@@ -85,6 +85,9 @@ fn build_request(cmd: Commands) -> Request {
 
 fn main() {
     let args = Args::parse();
+    // `--json` is accepted now for forward-compat; T3.2 will use it to select
+    // JSON-formatted response output instead of human-readable text.
+    let _json = args.json;
     let req = build_request(args.command);
 
     // Validate before any (future) IPC send.

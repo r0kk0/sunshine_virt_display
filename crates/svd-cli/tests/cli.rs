@@ -129,6 +129,26 @@ fn connect_missing_required_args_exits_nonzero() {
     );
 }
 
+// ── Bonus: mode in-range but not on VIC allowlist → exits 1 (mode_not_allowed) ──
+// 1024×768@60 is within numeric bounds but absent from the VIC table.
+// Guards against a future refactor that accidentally skips validate_request for
+// the allowlist path — a path not exercised by the 10 required cases above.
+#[test]
+fn connect_off_allowlist_mode_exits_1() {
+    let out = run(&["connect", "--width", "1024", "--height", "768", "--refresh", "60"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "expected exit 1 for off-allowlist mode, got {:?}",
+        out.status.code()
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("mode_not_allowed"),
+        "expected 'mode_not_allowed' in stderr, got: {stderr}"
+    );
+}
+
 // ── Bonus: --json flag is accepted (present per acceptance criterion 2) ───────
 #[test]
 fn json_flag_accepted_on_status() {
