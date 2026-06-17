@@ -7,6 +7,9 @@ description = "Privileged daemon for sunshine-virt-display"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 svd-proto = { path = "../svd-proto" }
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bin]]
 name = "svd-daemon"
