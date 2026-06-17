@@ -33,15 +33,18 @@ struct Args {
 enum Commands {
     /// Connect a virtual display with the given mode.
     Connect {
-        /// Horizontal resolution in pixels (1–16384).
+        /// Horizontal resolution in pixels. Must be part of an allowed mode (VIC table or
+        /// extra_allowed_modes in config). Sanity range: 1–16384.
         #[arg(long)]
         width: u32,
 
-        /// Vertical resolution in pixels (1–16384).
+        /// Vertical resolution in pixels. Must be part of an allowed mode (VIC table or
+        /// extra_allowed_modes in config). Sanity range: 1–16384.
         #[arg(long)]
         height: u32,
 
-        /// Refresh rate in Hz (24–480).
+        /// Refresh rate in Hz. Must be part of an allowed mode (VIC table or
+        /// extra_allowed_modes in config). Sanity range: 24–480.
         #[arg(long)]
         refresh: u32,
 

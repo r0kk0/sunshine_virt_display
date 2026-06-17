@@ -165,7 +165,7 @@ fn connect_dry_run_flag_accepted() {
     assert_eq!(out.status.code(), Some(0), "expected exit 0 with --dry-run");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("true"),
-        "expected dry_run:true in JSON, got: {stdout}"
+        stdout.contains("\"dry_run\": true"),
+        "expected \"dry_run\": true in JSON, got: {stdout}"
     );
 }
