@@ -1,9 +1,18 @@
-mod config;
-mod error;
-mod ipc;
+//! svd-daemon entry point.
+//!
+//! Parses CLI arguments, loads config, starts the IPC server.
+
+use std::sync::{
+    Arc,
+    atomic::AtomicBool,
+};
 
 use clap::Parser;
-use error::DaemonError;
+use svd_daemon::{
+    config::load_config,
+    error::DaemonError,
+    ipc::{run_server, ServerError, StubHandler},
+};
 
 /// Sunshine Virtual Display daemon (privileged)
 #[derive(Parser, Debug)]
@@ -15,7 +24,24 @@ struct Args {
 }
 
 fn run(_args: &Args) -> Result<(), DaemonError> {
-    Err(DaemonError::Ipc("not implemented yet".into()))
+    let config_path = std::path::Path::new("/etc/sunshine-vd/config.toml");
+
+    let config = load_config(config_path).map_err(|e| DaemonError::Config(e.to_string()))?;
+
+    let socket_path = std::path::PathBuf::from(&config.socket_path);
+
+    let handler = Arc::new(StubHandler);
+    // Graceful shutdown: set to true to stop the accept loop.
+    // No external signal hook yet (T3.3+); the daemon runs until killed.
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    run_server(&socket_path, handler, shutdown).map_err(|e| match e {
+        ServerError::Bind { path, source } => {
+            DaemonError::Ipc(format!("failed to bind socket at {}: {}", path.display(), source))
+        }
+        ServerError::Io(e) => DaemonError::Io(e),
+        ServerError::Framing(e) => DaemonError::Ipc(e.to_string()),
+    })
 }
 
 fn main() {

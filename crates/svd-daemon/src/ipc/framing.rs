@@ -1,10 +1,11 @@
-/// Newline-delimited JSON framing for the svd-daemon IPC channel.
-///
-/// Protocol:
-///   - One JSON object per line, newline-terminated (`\n`), UTF-8.
-///   - Maximum frame size: 4096 bytes total, including the trailing `\n`.
-///
-/// These functions are consumed by the IPC server in T3.2.
+//! Newline-delimited JSON framing for the svd-daemon IPC channel.
+//!
+//! Protocol:
+//!   - One JSON object per line, newline-terminated (`\n`), UTF-8.
+//!   - Maximum frame size: 4096 bytes total, including the trailing `\n`.
+//!
+//! These functions are consumed by the IPC server in T3.2.
+
 use std::io::{Read, Write};
 
 /// Maximum IPC frame size in bytes, including the trailing newline.
