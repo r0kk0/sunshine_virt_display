@@ -227,10 +227,13 @@ The daemon currently has no async runtime. Use the **blocking API** (`zbus::bloc
 pulling in tokio. If the daemon later multiplexes many concurrent event sources, migrate to async.
 
 ```toml
-zbus = { version = "5", default-features = false, features = ["blocking-api"] }
+zbus = "5"
 ```
 
-> Note: Since zbus 5.0, `blocking-api` is an opt-in Cargo feature; it is not included by default.
+> Note: In zbus 5.x, `blocking-api` and the `async-io` backend are **both enabled by default**.
+> The default configuration gives you `zbus::blocking::Connection` over the lightweight `async-io`
+> executor — no tokio required. Only add `features = ["tokio"]` if you later need tokio integration.
+> Confirmed from the zbus 5.16.0 Cargo feature manifest (8 default features, `blocking-api` among them).
 
 ### System Bus Connection
 
@@ -381,7 +384,7 @@ For `crates/svd-daemon/Cargo.toml`:
 ```toml
 [dependencies]
 drm  = "0.15"
-zbus = { version = "5", default-features = false, features = ["blocking-api"] }
+zbus = "5"
 libc = "0.2"
 # nix is NOT needed for the pidfd path; do not add it
 ```
@@ -392,7 +395,7 @@ Exact pinned versions for reference (use constraint `"0.15"` / `"5"` / `"0.2"` i
 | Crate | Latest stable | Notes |
 |-------|--------------|-------|
 | `drm` | 0.15.0 | Use `"0.15"` |
-| `zbus` | 5.16.0 | Use `"5"`, add `blocking-api` feature |
+| `zbus` | 5.16.0 | Use `"5"` — `blocking-api` and `async-io` backend are on by default |
 | `libc` | 0.2.186 | Use `"0.2"` — has `SYS_pidfd_open`, `SYS_pidfd_getfd` constants |
 | `nix` | 0.31.3 | **Do not add** — no pidfd support; libc::syscall is the right path |
 
@@ -410,6 +413,8 @@ Exact pinned versions for reference (use constraint `"0.15"` / `"5"` / `"0.2"` i
 | `libc::SYS_pidfd_open = 434`, `SYS_pidfd_getfd = 438` | Confirmed from docs.rs constant pages | High |
 | `zbus::blocking::Connection::system()` signature | Confirmed from docs.rs struct page | High |
 | `MessageIterator::for_match_rule` works for signals | Confirmed from docs.rs method page | High |
+| `blocking-api` on by default in zbus 5.x, `async-io` backend sufficient (no tokio needed) | Confirmed from zbus 5.16.0 feature manifest (8 defaults incl. `blocking-api`, `async-io`) | High |
+| zbus Cargo line compiles (`zbus = "5"`) | **NOT compile-tested** — cargo unavailable on research machine; inferred from feature manifest | High (uncompiled) |
 | OFD-sharing semantics for pidfd_getfd | Inferred from Linux man page + kernel OFD model | Medium — needs root test |
 | SET_MASTER ioctl behaviour on dup'd master fd | **NOT verified** — needs root + real `/dev/dri` | Deferred |
 | acquire_master_lock succeeds on dup of live master fd | **NOT verified** — needs root test | Deferred |
