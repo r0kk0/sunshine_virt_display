@@ -438,4 +438,21 @@ mod tests {
         // 23 is below the minimum of 24.
         assert_eq!(validate_request(&connect(1920, 1080, 23), &[]), Err("out_of_range"));
     }
+
+    #[test]
+    fn width_above_max_is_out_of_range() {
+        assert_eq!(validate_request(&connect(16385, 1080, 60), &[]), Err("out_of_range"));
+    }
+
+    #[test]
+    fn height_above_max_is_out_of_range() {
+        assert_eq!(validate_request(&connect(1920, 16385, 60), &[]), Err("out_of_range"));
+    }
+
+    #[test]
+    fn u32_overflow_rejected_by_serde() {
+        // Values exceeding u32::MAX are rejected at deserialization before validation.
+        let json = r#"{"cmd":"connect","width":99999999999,"height":1080,"refresh":60}"#;
+        assert!(serde_json::from_str::<Request>(json).is_err());
+    }
 }
