@@ -9,14 +9,13 @@
 //!   - A missing config file is safe: `load_config` returns the defaults.
 //!   - Unknown TOML keys are rejected via `deny_unknown_fields`.
 
-#![allow(dead_code)]
-
 use std::path::Path;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Error type
 // ──────────────────────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to read config file {path}: {source}")]
@@ -40,6 +39,7 @@ pub enum ConfigError {
 ///
 /// All fields have safe defaults; a missing config file produces the same
 /// result as an empty one.  Unknown keys are rejected at parse time.
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -102,6 +102,7 @@ impl Default for Config {
 ///   `Err(ConfigError::Io)`.
 /// - If the file exists but contains invalid TOML or unknown fields, return
 ///   `Err(ConfigError::Parse)`.
+#[allow(dead_code)]
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
