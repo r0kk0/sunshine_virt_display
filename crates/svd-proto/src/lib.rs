@@ -73,6 +73,7 @@ pub enum Response {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Mode {
     pub width: u32,
     pub height: u32,
