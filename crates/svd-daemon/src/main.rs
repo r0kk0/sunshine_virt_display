@@ -7,7 +7,7 @@ use error::DaemonError;
 #[derive(Parser, Debug)]
 #[command(name = "svd-daemon", version, about, long_about = None)]
 struct Args {
-    /// Enable verbose logging
+    /// Enable verbose logging (wired to tracing level in T2.3/config)
     #[arg(short, long)]
     verbose: bool,
 }
