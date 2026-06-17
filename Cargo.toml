@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/svd-proto",
+    "crates/svd-daemon",
+    "crates/svd-cli",
+]
+resolver = "2"

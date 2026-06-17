@@ -1,0 +1,5 @@
+[package]
+name = "svd-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Shared types for sunshine-virt-display (no I/O)"

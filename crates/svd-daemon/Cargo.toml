@@ -1,0 +1,17 @@
+[package]
+name = "svd-daemon"
+version = "0.1.0"
+edition = "2021"
+description = "Privileged daemon for sunshine-virt-display"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+svd-proto = { path = "../svd-proto" }
+
+[[bin]]
+name = "svd-daemon"
+path = "src/main.rs"
+
+[[bin]]
+name = "svd-restore"
+path = "src/bin/svd-restore.rs"

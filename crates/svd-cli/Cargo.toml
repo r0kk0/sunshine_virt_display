@@ -1,0 +1,13 @@
+[package]
+name = "svd-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Unprivileged CLI for sunshine-virt-display"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+svd-proto = { path = "../svd-proto" }
+
+[[bin]]
+name = "svd"
+path = "src/main.rs"
