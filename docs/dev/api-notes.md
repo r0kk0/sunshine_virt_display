@@ -328,15 +328,19 @@ Do not add `nix` as a dependency for the pidfd path.
 libc provides the syscall number constants (confirmed on docs.rs):
 
 ```rust
-// x86_64 Linux
-pub const SYS_pidfd_open:  c_long = 434;
-pub const SYS_pidfd_getfd: c_long = 438;
+// x86_64 Linux — syscall numbers differ on other architectures.
+// libc crate provides arch-specific constants via target_arch cfg.
+// These constants are correct for x86_64; on aarch64 pidfd_open is still 434
+// but other arches may differ. Add #[cfg(target_arch = "x86_64")] guards if
+// cross-arch builds are ever required.
+pub const SYS_pidfd_open:  c_long = 434;  // x86_64
+pub const SYS_pidfd_getfd: c_long = 438;  // x86_64
 ```
 
 Raw syscall approach:
 
 ```rust
-use std::os::unix::io::{OwnedFd, FromRawFd};
+use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd, FromRawFd};
 use libc::{c_long, pid_t};
 
 /// Opens a pidfd for the process with the given PID.
@@ -354,12 +358,14 @@ pub fn pidfd_open(pid: pid_t, flags: u32) -> std::io::Result<OwnedFd> {
 
 /// Duplicates `target_fd` from the process referred to by `pidfd`.
 /// `flags` must be 0 (reserved for future use).
+/// Takes `pidfd` as a `BorrowedFd` for consistent fd hygiene.
 /// Returns an OwnedFd on success.
-pub fn pidfd_getfd(pidfd: i32, target_fd: i32, flags: u32) -> std::io::Result<OwnedFd> {
+pub fn pidfd_getfd(pidfd: BorrowedFd<'_>, target_fd: i32, flags: u32) -> std::io::Result<OwnedFd> {
+    use std::os::unix::io::AsRawFd;
     let fd = unsafe {
         libc::syscall(
             libc::SYS_pidfd_getfd,
-            pidfd as c_long,
+            pidfd.as_raw_fd() as c_long,
             target_fd as c_long,
             flags as c_long,
         )
@@ -412,7 +418,7 @@ Exact pinned versions for reference (use constraint `"0.15"` / `"5"` / `"0.2"` i
 | `nix` lacks pidfd_open/pidfd_getfd | Confirmed from `nix::all` index for 0.31.3 | High |
 | `libc::SYS_pidfd_open = 434`, `SYS_pidfd_getfd = 438` | Confirmed from docs.rs constant pages | High |
 | `zbus::blocking::Connection::system()` signature | Confirmed from docs.rs struct page | High |
-| `MessageIterator::for_match_rule` works for signals | Confirmed from docs.rs method page | High |
+| `MessageIterator::for_match_rule` works for signals | Confirmed from docs.rs method page (uncompiled) | High (uncompiled) |
 | `blocking-api` on by default in zbus 5.x, `async-io` backend sufficient (no tokio needed) | Confirmed from zbus 5.16.0 feature manifest (8 defaults incl. `blocking-api`, `async-io`) | High |
 | zbus Cargo line compiles (`zbus = "5"`) | **NOT compile-tested** — cargo unavailable on research machine; inferred from feature manifest | High (uncompiled) |
 | OFD-sharing semantics for pidfd_getfd | Inferred from Linux man page + kernel OFD model | Medium — needs root test |
