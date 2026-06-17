@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod ipc;
 
 use clap::Parser;
 use error::DaemonError;
