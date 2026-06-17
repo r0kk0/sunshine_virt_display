@@ -12,5 +12,4 @@ struct Args {
 fn main() {
     let _args = Args::parse();
     eprintln!("svd-restore: not implemented yet");
-    std::process::exit(1);
 }

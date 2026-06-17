@@ -21,5 +21,4 @@ enum Commands {
 fn main() {
     let _args = Args::parse();
     eprintln!("svd: not implemented yet");
-    std::process::exit(1);
 }
