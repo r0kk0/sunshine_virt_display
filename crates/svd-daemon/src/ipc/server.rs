@@ -110,8 +110,9 @@ pub fn run_server(
         source: e,
     })?;
 
-    // Set socket permissions to 0660 (owner + group read/write; no world access).
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))?;
+    // Set socket permissions to 0666 so non-root users (e.g. the Sunshine process)
+    // can send commands without sudo. The daemon validates all requests server-side.
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
 
     // Non-blocking accept loop so we can poll the shutdown flag.
     listener.set_nonblocking(true)?;
