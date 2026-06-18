@@ -45,8 +45,8 @@ fn run(config: &Config) -> Result<(), DaemonError> {
     // handlers and the RealHandler (which propagates it to the crash watcher).
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown)).expect("signal registration");
-    signal_hook::flag::register(SIGINT, Arc::clone(&shutdown)).expect("signal registration");
+    signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))?;
+    signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))?;
 
     // Clone the strategy Arc before it is moved into RealHandler so that the
     // sleep handler can share the same strategy instance.
@@ -60,7 +60,7 @@ fn run(config: &Config) -> Result<(), DaemonError> {
 
     // Spawn the sleep/wake D-Bus listener thread.  It holds a logind inhibitor
     // delay lock and disconnects the virtual display before system sleep.
-    spawn_sleep_handler(sleep_strategy, Arc::clone(&shutdown));
+    spawn_sleep_handler(sleep_strategy, Arc::clone(&shutdown))?;
 
     let server_result = run_server(
         std::path::Path::new(SOCKET_PATH),

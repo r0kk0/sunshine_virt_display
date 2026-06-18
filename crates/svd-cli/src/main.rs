@@ -230,7 +230,14 @@ fn main() {
 
     // Output and exit.
     if json {
-        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        let output = match serde_json::to_string_pretty(&resp) {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("error: could not serialize daemon response ({error})");
+                std::process::exit(1);
+            }
+        };
+        println!("{output}");
         // Derive exit code from the ok/connected field.
         let ok = match &resp {
             Response::Connect { ok, .. } => *ok,

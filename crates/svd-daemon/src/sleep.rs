@@ -40,11 +40,14 @@ use crate::strategy::DisplayStrategy;
 /// The thread is intentionally non-joinable — the daemon's main thread owns
 /// the shutdown flag and will exit the process when it fires, which drops all
 /// threads naturally.
-pub fn spawn_sleep_handler(strategy: Arc<dyn DisplayStrategy>, shutdown: Arc<AtomicBool>) {
+pub fn spawn_sleep_handler(
+    strategy: Arc<dyn DisplayStrategy>,
+    shutdown: Arc<AtomicBool>,
+) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("sleep-handler".into())
-        .spawn(move || run_sleep_loop(strategy, shutdown))
-        .expect("failed to spawn sleep-handler thread");
+        .spawn(move || run_sleep_loop(strategy, shutdown))?;
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -133,7 +136,7 @@ fn run_sleep_loop(strategy: Arc<dyn DisplayStrategy>, shutdown: Arc<AtomicBool>)
 
     // Thread: PrepareForSleep listener
     // SignalIterator yields Option<Message> (infallible per signal).
-    std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("sleep-signal".into())
         .spawn(move || {
             for msg in sleep_iter {
@@ -146,10 +149,13 @@ fn run_sleep_loop(strategy: Arc<dyn DisplayStrategy>, shutdown: Arc<AtomicBool>)
                 }
             }
         })
-        .expect("spawn sleep-signal thread");
+    {
+        tracing::error!(%error, "sleep-handler: failed to spawn sleep signal listener");
+        return;
+    }
 
     // Thread: PrepareForShutdown listener
-    std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("shutdown-signal".into())
         .spawn(move || {
             for msg in shutdown_iter {
@@ -162,7 +168,10 @@ fn run_sleep_loop(strategy: Arc<dyn DisplayStrategy>, shutdown: Arc<AtomicBool>)
                 }
             }
         })
-        .expect("spawn shutdown-signal thread");
+    {
+        tracing::error!(%error, "sleep-handler: failed to spawn shutdown signal listener");
+        return;
+    }
 
     // ── Main dispatch loop ────────────────────────────────────────────────
     loop {

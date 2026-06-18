@@ -154,7 +154,10 @@ impl DisplayStrategy for KWinStrategy {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Guard: refuse if already connected to give a clear error instead of NoSlot.
         {
-            let guard = self.state.read().unwrap();
+            let guard = self
+                .state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if guard.is_some() {
                 return Err(StrategyError::AlreadyConnected);
             }
@@ -398,7 +401,10 @@ impl DisplayStrategy for KWinStrategy {
     }
 
     fn status(&self) -> StrategyStatus {
-        let guard = self.state.read().unwrap();
+        let guard = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match guard.as_ref() {
             Some(cs) => StrategyStatus {
                 phase: cs.phase,
