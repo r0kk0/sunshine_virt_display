@@ -27,8 +27,8 @@ use crate::strategy::{ConnectParams, DisplayStrategy};
 /// results to [`svd_proto::Response`] variants.
 ///
 /// Validates requests server-side against the configured mode allowlist before
-/// dispatching to the strategy (defense-in-depth: the CLI validates too, but
-/// the daemon socket is world-readable so any process can write to it).
+/// dispatching to the strategy. Kernel socket permissions and peer credentials
+/// provide authorization; validation remains a separate defense-in-depth gate.
 ///
 /// On a successful `Connect` request the handler spawns the
 /// `sunshine-watcher` background thread (T5) so the virtual display is

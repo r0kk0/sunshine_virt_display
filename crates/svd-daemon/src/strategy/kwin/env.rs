@@ -65,13 +65,12 @@ pub struct KWinEnv {
 }
 
 impl KWinEnv {
-    /// Scan `/proc` for a process named `kwin_wayland` and extract its
-    /// `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` from `/proc/$pid/environ`.
+    /// Scan `/proc` for a verified `kwin_wayland` process owned by the requested
+    /// UID, then locate its Wayland socket without requiring ptrace capability.
     ///
     /// Returns [`StrategyError::CompositorNotFound`] if no `kwin_wayland`
-    /// process exists or if either required variable is absent or empty.
-    /// Returns [`StrategyError::Io`] on top-level `/proc` read failure or on
-    /// failure to read the matched process's `environ` file.
+    /// process or usable runtime socket can be identified. Returns
+    /// [`StrategyError::Io`] when top-level `/proc` enumeration fails.
     pub fn detect() -> Result<Self, StrategyError> {
         Self::detect_for_uid(None)
     }

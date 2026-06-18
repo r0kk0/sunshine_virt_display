@@ -108,9 +108,8 @@ fn parse_geometry(s: &str) -> Option<(i32, i32, u32, u32)> {
 /// environment. Extracted so tests can inject an arbitrary binary name
 /// without requiring `kscreen-doctor` to be installed.
 ///
-/// `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` are set from `env`; the rest of the
-/// daemon's environment is inherited (no `.env_clear()`) — no secrets are
-/// expected in the daemon's environment at this call site.
+/// `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` are set from `env`; all other daemon
+/// environment variables are cleared before credentials are dropped.
 fn run_with_binary(binary: &str, env: &KWinEnv, args: &[&str]) -> Result<String, StrategyError> {
     let output = Command::new(binary)
         .uid(env.uid)
