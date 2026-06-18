@@ -8,6 +8,7 @@ description = "Privileged daemon for sunshine-virt-display"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+signal-hook = "0.3"
 svd-proto = { path = "../svd-proto" }
 thiserror = "1"
 toml = "0.8"

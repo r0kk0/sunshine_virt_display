@@ -8,6 +8,7 @@ use std::sync::{
 };
 
 use clap::Parser;
+use signal_hook::consts::{SIGINT, SIGTERM};
 use svd_daemon::{
     config::load_config,
     error::DaemonError,
@@ -31,9 +32,12 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
     let socket_path = std::path::PathBuf::from(&config.socket_path);
 
     let handler = Arc::new(StubHandler);
-    // Graceful shutdown: set to true to stop the accept loop.
-    // No external signal hook yet (T3.3+); the daemon runs until killed.
     let shutdown = Arc::new(AtomicBool::new(false));
+
+    signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
+        .expect("signal registration");
+    signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
+        .expect("signal registration");
 
     run_server(&socket_path, handler, shutdown).map_err(|e| match e {
         ServerError::Bind { path, source } => {
@@ -49,13 +53,16 @@ fn main() {
     let args = Args::parse();
 
     // Initialise structured tracing to stderr.
-    // Default level is INFO; can be overridden via RUST_LOG env var.
+    // Priority: RUST_LOG env var > --verbose flag > default "info".
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            let level = if args.verbose { "debug" } else { "info" };
+            tracing_subscriber::EnvFilter::new(level)
+        });
+
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(filter)
         .init();
 
     tracing::info!("svd-daemon starting");
