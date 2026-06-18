@@ -2,7 +2,12 @@
 //!
 //! All functions use `std::fs` — no subprocess, no shell.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::OpenOptions,
+    io::{Read, Seek, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Path, PathBuf},
+};
 
 use crate::strategy::StrategyError;
 
@@ -166,20 +171,42 @@ pub fn clear_kwin_output_config(port: &str, uid: u32) -> Result<(), StrategyErro
     let config_path = Path::new(&home)
         .join(".config")
         .join("kwinoutputconfig.json");
-    let contents = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(StrategyError::Io(e)),
-    };
-    if let Some(rewritten) = filter_kwin_output_config(&contents, port) {
-        std::fs::write(&config_path, rewritten)?;
-    }
-    Ok(())
+    rewrite_kwin_config_file(&config_path, port, uid)
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn rewrite_kwin_config_file(path: &Path, port: &str, uid: u32) -> Result<(), StrategyError> {
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(StrategyError::Io(error)),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != uid {
+        return Err(StrategyError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "KWin config must be a regular file owned by the session user",
+        )));
+    }
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    if let Some(rewritten) = filter_kwin_output_config(&contents, port) {
+        file.rewind()?;
+        file.set_len(0)?;
+        file.write_all(rewritten.as_bytes())?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
 
 /// Parse `/etc/passwd` to find the home directory for `uid`.
 /// Line format: `name:password:uid:gid:gecos:home:shell`
@@ -380,5 +407,26 @@ mod tests {
         // uid u32::MAX should never exist in /etc/passwd
         let home = find_home_for_uid(u32::MAX);
         assert!(home.is_none());
+    }
+
+    #[test]
+    fn kwin_config_rewrite_rejects_symlink_targets() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+
+        let directory = std::env::temp_dir().join(format!("svd_kwin_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("target.json");
+        let link = directory.join("kwinoutputconfig.json");
+        std::fs::write(&target, r#"[{"name":"DP-1"}]"#).unwrap();
+        symlink(&target, &link).unwrap();
+        let uid = std::fs::metadata("/proc/self").unwrap().uid();
+
+        assert!(rewrite_kwin_config_file(&link, "DP-1", uid).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            r#"[{"name":"DP-1"}]"#
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }
