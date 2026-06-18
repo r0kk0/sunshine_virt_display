@@ -12,6 +12,7 @@ use crate::strategy::kwin::state::ConnectState;
 use crate::strategy::{
     ConnectParams, ConnectResult, DisplayStrategy, StrategyError, StrategyStatus,
 };
+use svd_proto::{CardId, ConnectorId, LifecyclePhase, Mode};
 
 // ---------------------------------------------------------------------------
 // Local helper: read the real uid of a process from /proc/$pid/status
@@ -209,17 +210,20 @@ impl DisplayStrategy for KWinStrategy {
         }
 
         // Step 14: Build ConnectState with full layout snapshot.
-        let card_index = card.trim_start_matches("card");
-        let edid_override_path = format!(
-            "/sys/kernel/debug/dri/{}/{}/edid_override",
-            card_index, slot
-        );
         let cs = ConnectState {
-            card: card.clone(),
-            virtual_port: slot.clone(),
+            schema_version: state::CURRENT_SCHEMA_VERSION,
+            phase: LifecyclePhase::Connected,
+            card: CardId::try_from(card.as_str())
+                .map_err(|error| StrategyError::Other(error.into()))?,
+            virtual_port: ConnectorId::try_from(slot.as_str())
+                .map_err(|error| StrategyError::Other(error.into()))?,
+            mode: Mode {
+                width: params.width,
+                height: params.height,
+                refresh: params.refresh,
+            },
+            session_uid: kwin_env.uid,
             previous_layout: layout_snapshot,
-            previous_ports: vec![],
-            edid_override_path,
         };
 
         // Step 15: Save state.
@@ -272,7 +276,7 @@ impl DisplayStrategy for KWinStrategy {
 
             if !cs.previous_layout.is_empty() {
                 for output in &cs.previous_layout {
-                    if output.name == cs.virtual_port {
+                    if output.name == cs.virtual_port.as_str() {
                         continue; // virtual port is cleaned up via sysfs below
                     }
                     if output.enabled {
@@ -283,15 +287,10 @@ impl DisplayStrategy for KWinStrategy {
                         restore_args.push(format!("output.{}.enable", output.name));
                     }
                 }
-            } else {
-                // Legacy fallback: no layout snapshot, just re-enable previous_ports.
-                for port in &cs.previous_ports {
-                    restore_args.push(format!("output.{}.enable", port));
-                }
             }
 
             // Always disable the virtual port as part of the atomic restore.
-            restore_args.push(format!("output.{}.disable", cs.virtual_port));
+            restore_args.push(format!("output.{}.disable", cs.virtual_port.as_str()));
 
             if !restore_args.is_empty() {
                 let args_refs: Vec<&str> = restore_args.iter().map(|s| s.as_str()).collect();
@@ -305,7 +304,9 @@ impl DisplayStrategy for KWinStrategy {
         }
 
         // Step 4: Set connector status to off via sysfs (best-effort).
-        if let Err(e) = sysfs::set_connector_status(&cs.card, &cs.virtual_port, false) {
+        if let Err(e) =
+            sysfs::set_connector_status(cs.card.as_str(), cs.virtual_port.as_str(), false)
+        {
             tracing::warn!(
                 error = %e,
                 "failed to set sysfs connector status to off; continuing"
@@ -313,7 +314,7 @@ impl DisplayStrategy for KWinStrategy {
         }
 
         // Step 5: Clear EDID override (best-effort).
-        if let Err(e) = sysfs::clear_edid_override(&cs.card, &cs.virtual_port) {
+        if let Err(e) = sysfs::clear_edid_override(cs.card.as_str(), cs.virtual_port.as_str()) {
             tracing::warn!(
                 error = %e,
                 "failed to clear EDID override; continuing"
@@ -354,7 +355,7 @@ impl DisplayStrategy for KWinStrategy {
                 .map(|raw| {
                     kscreen::parse_outputs(&raw)
                         .into_iter()
-                        .any(|o| o.name == cs.virtual_port && o.enabled)
+                        .any(|o| o.name == cs.virtual_port.as_str() && o.enabled)
                 })
                 .unwrap_or(false),
             Err(_) => false,
@@ -379,17 +380,19 @@ impl DisplayStrategy for KWinStrategy {
 
             // Tell KWin to remove the output (best-effort, KWin may be gone).
             if let Ok(kwin_env) = env::KWinEnv::detect() {
-                let disable_arg = format!("output.{}.disable", cs.virtual_port);
+                let disable_arg = format!("output.{}.disable", cs.virtual_port.as_str());
                 let _ = kscreen::run(&kwin_env, &[disable_arg.as_str()]);
             }
 
             // Reset sysfs status so find_empty_slot() sees the slot as free.
-            if let Err(e) = sysfs::set_connector_status(&cs.card, &cs.virtual_port, false) {
+            if let Err(e) =
+                sysfs::set_connector_status(cs.card.as_str(), cs.virtual_port.as_str(), false)
+            {
                 tracing::warn!(error = %e, "stale cleanup: failed to set sysfs status to off");
             }
 
             // Remove the EDID override so the kernel stops reporting the connector.
-            if let Err(e) = sysfs::clear_edid_override(&cs.card, &cs.virtual_port) {
+            if let Err(e) = sysfs::clear_edid_override(cs.card.as_str(), cs.virtual_port.as_str()) {
                 tracing::warn!(error = %e, "stale cleanup: failed to clear EDID override");
             }
 
@@ -409,9 +412,12 @@ impl DisplayStrategy for KWinStrategy {
         match guard.as_ref() {
             Some(cs) => StrategyStatus {
                 connected: true,
-                card: Some(cs.card.clone()),
-                connector: Some(cs.virtual_port.clone()),
-                mode: None,
+                card: Some(cs.card.to_string()),
+                connector: Some(cs.virtual_port.to_string()),
+                mode: Some(format!(
+                    "{}x{}@{}",
+                    cs.mode.width, cs.mode.height, cs.mode.refresh
+                )),
                 strategy: Some("kwin".into()),
             },
             None => StrategyStatus {
