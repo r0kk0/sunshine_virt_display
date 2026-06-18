@@ -3,6 +3,30 @@ use std::fs;
 
 use crate::strategy::StrategyError;
 
+/// Extract the Wayland socket name from a process's `/proc/$pid/cmdline`.
+///
+/// KWin receives the socket name via `--socket <name>` rather than setting
+/// `WAYLAND_DISPLAY` in its own environment, so we fall back to this when
+/// the variable is absent.  Returns `None` if the arg is not present.
+fn read_socket_from_cmdline(pid: u32) -> Option<String> {
+    let raw = fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
+    // cmdline is a NUL-separated list of arguments.
+    let args: Vec<&str> = raw
+        .split(|&b| b == 0)
+        .filter_map(|s| std::str::from_utf8(s).ok())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for (i, arg) in args.iter().enumerate() {
+        if *arg == "--socket" {
+            return args.get(i + 1).map(|s| s.to_string());
+        }
+        if let Some(val) = arg.strip_prefix("--socket=") {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
 /// Wayland session environment extracted from a running `kwin_wayland` process.
 #[derive(Debug, Clone)]
 pub struct KWinEnv {
@@ -62,19 +86,29 @@ impl KWinEnv {
 
             let vars = parse_environ(&raw);
 
-            let wayland_display = vars
-                .get("WAYLAND_DISPLAY")
-                .cloned()
-                .unwrap_or_default();
             let xdg_runtime_dir = vars
                 .get("XDG_RUNTIME_DIR")
                 .cloned()
                 .unwrap_or_default();
 
-            // This candidate is missing the session vars — try the next one.
-            if wayland_display.is_empty() || xdg_runtime_dir.is_empty() {
+            if xdg_runtime_dir.is_empty() {
                 continue;
             }
+
+            // KWin often does not set WAYLAND_DISPLAY in its own environment —
+            // the socket name is passed via --socket <name> on the command line.
+            // Fall back to reading cmdline, then to the conventional default.
+            let wayland_display = {
+                let from_env = vars
+                    .get("WAYLAND_DISPLAY")
+                    .cloned()
+                    .unwrap_or_default();
+                if !from_env.is_empty() {
+                    from_env
+                } else {
+                    read_socket_from_cmdline(pid).unwrap_or_else(|| "wayland-0".into())
+                }
+            };
 
             return Ok(KWinEnv {
                 pid,
