@@ -53,7 +53,7 @@ fn run(config: &Config) -> Result<(), DaemonError> {
     let sleep_strategy: Arc<dyn DisplayStrategy> = strategy.clone();
 
     let handler: Arc<dyn RequestHandler> = Arc::new(RealHandler::new(
-        strategy,
+        strategy.clone(),
         config.extra_allowed_modes.clone(),
         Arc::clone(&shutdown),
     ));
@@ -62,10 +62,10 @@ fn run(config: &Config) -> Result<(), DaemonError> {
     // delay lock and disconnects the virtual display before system sleep.
     spawn_sleep_handler(sleep_strategy, Arc::clone(&shutdown));
 
-    run_server(
+    let server_result = run_server(
         std::path::Path::new(SOCKET_PATH),
         handler,
-        shutdown,
+        Arc::clone(&shutdown),
         std::time::Duration::from_secs(config.ipc_timeout_secs),
     )
     .map_err(|e| match e {
@@ -80,7 +80,15 @@ fn run(config: &Config) -> Result<(), DaemonError> {
             "refusing to replace non-socket path at {}",
             path.display()
         )),
-    })
+    });
+
+    if strategy.status().phase != svd_proto::LifecyclePhase::Disconnected {
+        if let Err(error) = strategy.disconnect() {
+            tracing::error!(%error, "display cleanup during daemon shutdown failed");
+        }
+    }
+
+    server_result
 }
 
 fn main() {

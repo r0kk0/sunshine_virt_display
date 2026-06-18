@@ -51,6 +51,8 @@ pub enum StrategyError {
     NotConnected,
     #[error("already connected — disconnect first")]
     AlreadyConnected,
+    #[error("requester is not authorized for the active display session")]
+    Unauthorized,
     #[error("{0}")]
     Other(String),
 }
@@ -60,4 +62,5 @@ pub trait DisplayStrategy: Send + Sync {
     fn disconnect(&self) -> Result<(), StrategyError>;
     fn restore(&self) -> Result<(), StrategyError>;
     fn status(&self) -> StrategyStatus;
+    fn is_authorized(&self, uid: u32) -> bool;
 }

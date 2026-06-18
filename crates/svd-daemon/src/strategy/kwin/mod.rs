@@ -421,6 +421,18 @@ impl DisplayStrategy for KWinStrategy {
             },
         }
     }
+
+    fn is_authorized(&self, uid: u32) -> bool {
+        if uid == 0 {
+            return true;
+        }
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|state| state.session_uid == uid)
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

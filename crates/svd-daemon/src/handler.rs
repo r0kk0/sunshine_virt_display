@@ -10,7 +10,7 @@
 //!     concrete implementation (KWinStrategy is injected at construction time
 //!     via Arc).
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::ipc::server::{RequestContext, RequestHandler};
@@ -39,6 +39,7 @@ pub struct RealHandler {
     /// Propagated to the crash-watcher so it stops cleanly when the daemon
     /// receives SIGTERM / SIGINT.
     shutdown: Arc<AtomicBool>,
+    watcher_generation: Arc<AtomicU64>,
 }
 
 impl RealHandler {
@@ -52,6 +53,7 @@ impl RealHandler {
             strategy,
             extra_allowed_modes,
             shutdown,
+            watcher_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -92,6 +94,23 @@ impl RequestHandler for RealHandler {
             };
         }
 
+        if matches!(req, Request::Disconnect {} | Request::Restore {})
+            && !self.strategy.is_authorized(context.peer.uid)
+        {
+            let error = crate::strategy::StrategyError::Unauthorized.to_string();
+            return match req {
+                Request::Disconnect {} => Response::Disconnect {
+                    ok: false,
+                    error: Some(error),
+                },
+                Request::Restore {} => Response::Restore {
+                    ok: false,
+                    error: Some(error),
+                },
+                _ => unreachable!(),
+            };
+        }
+
         match req {
             // ── Connect ────────────────────────────────────────────────────────
             Request::Connect {
@@ -127,10 +146,17 @@ impl RequestHandler for RealHandler {
                         // T5: Spawn crash watcher after a successful connect so that
                         // the virtual display is automatically disconnected if Sunshine
                         // exits unexpectedly.
-                        crate::watcher::spawn_watcher(
+                        let token = self.watcher_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                        if let Err(error) = crate::watcher::spawn_watcher(
                             Arc::clone(&self.strategy),
                             Arc::clone(&self.shutdown),
-                        );
+                            Arc::clone(&self.watcher_generation),
+                            token,
+                            context.peer.pid,
+                            context.peer.uid,
+                        ) {
+                            tracing::warn!(%error, "could not spawn Sunshine watcher");
+                        }
 
                         Response::Connect {
                             ok: true,
@@ -153,16 +179,19 @@ impl RequestHandler for RealHandler {
             }
 
             // ── Disconnect ─────────────────────────────────────────────────────
-            Request::Disconnect {} => match self.strategy.disconnect() {
-                Ok(()) => Response::Disconnect {
-                    ok: true,
-                    error: None,
-                },
-                Err(e) => Response::Disconnect {
-                    ok: false,
-                    error: Some(e.to_string()),
-                },
-            },
+            Request::Disconnect {} => {
+                self.watcher_generation.fetch_add(1, Ordering::AcqRel);
+                match self.strategy.disconnect() {
+                    Ok(()) => Response::Disconnect {
+                        ok: true,
+                        error: None,
+                    },
+                    Err(e) => Response::Disconnect {
+                        ok: false,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
 
             // ── Status ─────────────────────────────────────────────────────────
             Request::Status {} => {
@@ -179,16 +208,19 @@ impl RequestHandler for RealHandler {
             }
 
             // ── Restore ────────────────────────────────────────────────────────
-            Request::Restore {} => match self.strategy.restore() {
-                Ok(()) => Response::Restore {
-                    ok: true,
-                    error: None,
-                },
-                Err(e) => Response::Restore {
-                    ok: false,
-                    error: Some(e.to_string()),
-                },
-            },
+            Request::Restore {} => {
+                self.watcher_generation.fetch_add(1, Ordering::AcqRel);
+                match self.strategy.restore() {
+                    Ok(()) => Response::Restore {
+                        ok: true,
+                        error: None,
+                    },
+                    Err(e) => Response::Restore {
+                        ok: false,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
         }
     }
 }
