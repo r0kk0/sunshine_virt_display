@@ -62,7 +62,13 @@ fn run(config: &Config) -> Result<(), DaemonError> {
     // delay lock and disconnects the virtual display before system sleep.
     spawn_sleep_handler(sleep_strategy, Arc::clone(&shutdown));
 
-    run_server(std::path::Path::new(SOCKET_PATH), handler, shutdown).map_err(|e| match e {
+    run_server(
+        std::path::Path::new(SOCKET_PATH),
+        handler,
+        shutdown,
+        std::time::Duration::from_secs(config.ipc_timeout_secs),
+    )
+    .map_err(|e| match e {
         ServerError::Bind { path, source } => DaemonError::Ipc(format!(
             "failed to bind socket at {}: {}",
             path.display(),
@@ -70,6 +76,10 @@ fn run(config: &Config) -> Result<(), DaemonError> {
         )),
         ServerError::Io(e) => DaemonError::Io(e),
         ServerError::Framing(e) => DaemonError::Ipc(e.to_string()),
+        ServerError::UnsafeSocketPath { path } => DaemonError::Ipc(format!(
+            "refusing to replace non-socket path at {}",
+            path.display()
+        )),
     })
 }
 

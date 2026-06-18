@@ -13,7 +13,13 @@
 //!     closed rather than panicking.
 
 use std::{
-    os::unix::net::UnixListener,
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::FileTypeExt,
+            net::{UnixListener, UnixStream},
+        },
+    },
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -41,18 +47,66 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
     #[error("framing error: {0}")]
     Framing(#[from] FrameError),
+    #[error("refusing to replace non-socket path at {path}")]
+    UnsafeSocketPath { path: std::path::PathBuf },
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Handler trait
 // ──────────────────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCredentials {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestContext {
+    pub peer: PeerCredentials,
+}
+
+fn peer_credentials(stream: &UnixStream) -> std::io::Result<PeerCredentials> {
+    let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the output buffer is valid for `length`, and the stream owns a
+    // live Unix-domain socket descriptor for the duration of the call.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            credentials.as_mut_ptr().cast(),
+            &mut length,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if length as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected SO_PEERCRED length",
+        ));
+    }
+    // SAFETY: getsockopt succeeded and initialized exactly one `ucred` value.
+    let credentials = unsafe { credentials.assume_init() };
+    let pid = u32::try_from(credentials.pid)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "negative peer pid"))?;
+    Ok(PeerCredentials {
+        pid,
+        uid: credentials.uid,
+        gid: credentials.gid,
+    })
+}
+
 /// Called for each incoming request.  Returns a [`svd_proto::Response`].
 ///
 /// Implementations must be `Send + Sync` because the server may be moved to
 /// a background thread while the main thread holds an `Arc` to the same handler.
 pub trait RequestHandler: Send + Sync {
-    fn handle(&self, req: svd_proto::Request) -> svd_proto::Response;
+    fn handle(&self, context: RequestContext, req: svd_proto::Request) -> svd_proto::Response;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -66,7 +120,7 @@ pub trait RequestHandler: Send + Sync {
 pub struct StubHandler;
 
 impl RequestHandler for StubHandler {
-    fn handle(&self, req: svd_proto::Request) -> svd_proto::Response {
+    fn handle(&self, _context: RequestContext, req: svd_proto::Request) -> svd_proto::Response {
         use svd_proto::{Request, Response};
         match req {
             Request::Status {} => Response::Status {
@@ -103,19 +157,25 @@ pub fn run_server(
     socket_path: &Path,
     handler: Arc<dyn RequestHandler>,
     shutdown: Arc<AtomicBool>,
+    ipc_timeout: std::time::Duration,
 ) -> Result<(), ServerError> {
-    // Remove a stale socket file from a previous run (or crash).
-    // Ignoring NotFound is intentional — on first start there is nothing to remove.
-    let _ = std::fs::remove_file(socket_path);
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(socket_path)?,
+        Ok(_) => {
+            return Err(ServerError::UnsafeSocketPath {
+                path: socket_path.to_path_buf(),
+            });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ServerError::Io(error)),
+    }
 
     let listener = UnixListener::bind(socket_path).map_err(|e| ServerError::Bind {
         path: socket_path.to_path_buf(),
         source: e,
     })?;
 
-    // Set socket permissions to 0666 so non-root users (e.g. the Sunshine process)
-    // can send commands without sudo. The daemon validates all requests server-side.
-    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o666))?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))?;
 
     // Non-blocking accept loop so we can poll the shutdown flag.
     listener.set_nonblocking(true)?;
@@ -136,6 +196,21 @@ pub fn run_server(
                     tracing::warn!(error = %e, "could not set stream to blocking; skipping connection");
                     continue;
                 }
+                if let Err(error) = stream.set_read_timeout(Some(ipc_timeout)) {
+                    tracing::warn!(%error, "could not set IPC read timeout");
+                    continue;
+                }
+                if let Err(error) = stream.set_write_timeout(Some(ipc_timeout)) {
+                    tracing::warn!(%error, "could not set IPC write timeout");
+                    continue;
+                }
+                let context = match peer_credentials(&stream) {
+                    Ok(peer) => RequestContext { peer },
+                    Err(error) => {
+                        tracing::warn!(%error, "could not read IPC peer credentials");
+                        continue;
+                    }
+                };
 
                 // Read one request frame.
                 let frame = match read_frame(&mut stream) {
@@ -159,9 +234,9 @@ pub fn run_server(
                     }
                 };
 
-                tracing::debug!(?req, "received request");
+                tracing::debug!(?req, peer = ?context.peer, "received request");
 
-                let resp = handler.handle(req);
+                let resp = handler.handle(context, req);
 
                 tracing::debug!(?resp, "sending response");
 
@@ -193,10 +268,20 @@ pub fn run_server(
 mod tests {
     use super::*;
 
+    fn context() -> RequestContext {
+        RequestContext {
+            peer: PeerCredentials {
+                pid: 1,
+                uid: 1000,
+                gid: 1000,
+            },
+        }
+    }
+
     #[test]
     fn stub_handler_status_returns_ok() {
         let handler = StubHandler;
-        let resp = handler.handle(svd_proto::Request::Status {});
+        let resp = handler.handle(context(), svd_proto::Request::Status {});
         match resp {
             svd_proto::Response::Status { ok, connected, .. } => {
                 assert!(ok);
@@ -209,7 +294,7 @@ mod tests {
     #[test]
     fn stub_handler_unknown_returns_disconnect_ok() {
         let handler = StubHandler;
-        let resp = handler.handle(svd_proto::Request::Disconnect {});
+        let resp = handler.handle(context(), svd_proto::Request::Disconnect {});
         assert!(matches!(
             resp,
             svd_proto::Response::Disconnect { ok: true, .. }

@@ -13,7 +13,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use crate::ipc::server::RequestHandler;
+use crate::ipc::server::{RequestContext, RequestHandler};
 use crate::strategy::kwin::KWinStrategy;
 use crate::strategy::{ConnectParams, DisplayStrategy};
 
@@ -58,7 +58,7 @@ impl RealHandler {
 }
 
 impl RequestHandler for RealHandler {
-    fn handle(&self, req: svd_proto::Request) -> svd_proto::Response {
+    fn handle(&self, _context: RequestContext, req: svd_proto::Request) -> svd_proto::Response {
         use svd_proto::{Request, Response};
 
         // Server-side validation — rejects out-of-range or non-allowlisted modes
