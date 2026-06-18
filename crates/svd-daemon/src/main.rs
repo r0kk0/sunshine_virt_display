@@ -43,7 +43,7 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
         tracing::warn!(error = %e, "restore() failed on startup — starting fresh");
     }
 
-    let handler: Arc<dyn RequestHandler> = Arc::new(RealHandler::new(strategy));
+    let handler: Arc<dyn RequestHandler> = Arc::new(RealHandler::new(strategy, config.extra_allowed_modes.clone()));
     let shutdown = Arc::new(AtomicBool::new(false));
 
     signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))

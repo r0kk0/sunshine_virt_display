@@ -24,20 +24,42 @@ use crate::strategy::kwin::KWinStrategy;
 /// Wraps a shared `KWinStrategy` instance and translates each
 /// [`svd_proto::Request`] into the corresponding strategy call, mapping
 /// results to [`svd_proto::Response`] variants.
+///
+/// Validates requests server-side against the configured mode allowlist before
+/// dispatching to the strategy (defense-in-depth: the CLI validates too, but
+/// the daemon socket is world-readable so any process can write to it).
 pub struct RealHandler {
     strategy: Arc<KWinStrategy>,
+    extra_allowed_modes: Vec<svd_proto::Mode>,
 }
 
 impl RealHandler {
     /// Construct a new `RealHandler` backed by the given `KWinStrategy`.
-    pub fn new(strategy: Arc<KWinStrategy>) -> Self {
-        RealHandler { strategy }
+    pub fn new(strategy: Arc<KWinStrategy>, extra_allowed_modes: Vec<svd_proto::Mode>) -> Self {
+        RealHandler { strategy, extra_allowed_modes }
     }
 }
 
 impl RequestHandler for RealHandler {
     fn handle(&self, req: svd_proto::Request) -> svd_proto::Response {
         use svd_proto::{Request, Response};
+
+        // Server-side validation — rejects out-of-range or non-allowlisted modes
+        // before they reach the strategy layer.
+        if let Err(e) = svd_proto::validate_request(&req, &self.extra_allowed_modes) {
+            return match &req {
+                Request::Connect { .. } => Response::Connect {
+                    ok: false, connector: None, card: None, mode: None,
+                    error: Some(e.to_string()), message: None,
+                },
+                Request::Disconnect {} => Response::Disconnect { ok: false, error: Some(e.to_string()) },
+                Request::Status {} => Response::Status {
+                    ok: false, connected: false, card: None, connector: None,
+                    mode: None, strategy: None,
+                },
+                Request::Restore {} => Response::Restore { ok: false, error: Some(e.to_string()) },
+            };
+        }
 
         match req {
             // ── Connect ────────────────────────────────────────────────────────
