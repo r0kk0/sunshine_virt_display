@@ -103,7 +103,9 @@ pub fn find_empty_slot(card: &str) -> Result<String, StrategyError> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if status.trim() != "disconnected" {
+        // Accept "disconnected" (never had a display) or "off" (we wrote "off"
+        // in a previous disconnect to remove our virtual display).
+        if !matches!(status.trim(), "disconnected" | "off") {
             continue;
         }
         if connector.starts_with("DP-") {

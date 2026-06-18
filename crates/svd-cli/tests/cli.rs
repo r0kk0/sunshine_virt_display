@@ -157,23 +157,28 @@ fn connect_missing_required_args_exits_nonzero() {
     );
 }
 
-// ── Bonus: mode in-range but not on VIC allowlist → exits 1 (mode_not_allowed) ──
-// 1024×768@60 is within numeric bounds but absent from the VIC table.
-// Guards against a future refactor that accidentally skips validate_request for
-// the allowlist path — a path not exercised by the 10 required cases above.
+// ── Bonus: mode in-range but not on VIC allowlist → CLI passes it to daemon ──
+// 1024×768@60 is within numeric bounds; the CLI no longer checks the allowlist
+// (that responsibility is the daemon's, which knows extra_allowed_modes from its
+// config). With no daemon running the CLI exits 1 with "daemon not running".
 #[test]
-fn connect_off_allowlist_mode_exits_1() {
+fn connect_off_allowlist_mode_reaches_daemon() {
     let out = run(&["connect", "--width", "1024", "--height", "768", "--refresh", "60"]);
     assert_eq!(
         out.status.code(),
         Some(1),
-        "expected exit 1 for off-allowlist mode, got {:?}",
+        "expected exit 1 (daemon not running), got {:?}",
         out.status.code()
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
+    // The CLI must NOT reject this locally — mode allowlist is a daemon concern.
     assert!(
-        stderr.contains("mode_not_allowed"),
-        "expected 'mode_not_allowed' in stderr, got: {stderr}"
+        !stderr.contains("mode_not_allowed"),
+        "CLI must not reject off-allowlist mode locally, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("daemon not running"),
+        "expected 'daemon not running' in stderr, got: {stderr}"
     );
 }
 

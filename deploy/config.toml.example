@@ -26,10 +26,48 @@
 # Built-in VIC table includes: 720p@30/60, 1080p@30/60/120, 1440p@60/120, 4K@30/60.
 # Add custom resolutions here — required for modes outside the VIC table.
 #
+# ── 1440p extra refresh rates ──────────────────────────────────────────────
+# (60 and 120 are already built-in)
+#
 # [[extra_allowed_modes]]
 # width = 2560
 # height = 1440
 # refresh = 165
+#
+# ── iPad resolutions (landscape) ───────────────────────────────────────────
+#
+# iPad mini (6th gen)
+# [[extra_allowed_modes]]
+# width = 2266
+# height = 1488
+# refresh = 60
+#
+# iPad 10th gen / iPad Air 11" (M2)
+# [[extra_allowed_modes]]
+# width = 2360
+# height = 1640
+# refresh = 60
+#
+# iPad Pro 11"
+# [[extra_allowed_modes]]
+# width = 2388
+# height = 1668
+# refresh = 60
+#
+# iPad Air 13" (M2) / iPad Pro 12.9"
+# [[extra_allowed_modes]]
+# width = 2732
+# height = 2048
+# refresh = 60
+#
+# iPad Pro 13" (M4)
+# [[extra_allowed_modes]]
+# width = 2752
+# height = 2064
+# refresh = 60
+#
+# ── 4K extra refresh rates ─────────────────────────────────────────────────
+# (30 and 60 are already built-in)
 #
 # [[extra_allowed_modes]]
 # width = 3840

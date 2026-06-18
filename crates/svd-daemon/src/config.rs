@@ -76,8 +76,13 @@ pub struct Config {
 
     /// Connectors to disable when a virtual display is connected.
     /// Example: ["DP-1", "HDMI-A-2"]
-    /// If empty (default), all currently connected outputs on the selected card
-    /// are disabled automatically.
+    ///
+    /// Scenarios:
+    ///   []                 — (default) add virtual display, leave all physical monitors on
+    ///   ["DP-1"]           — disable primary monitor only, keep secondary active
+    ///   ["DP-1","HDMI-A-1"]— disable all physical monitors (headless/remote streaming)
+    ///
+    /// Use `kscreen-doctor -o` to discover connector names.
     pub disable_outputs: Vec<String>,
 }
 
