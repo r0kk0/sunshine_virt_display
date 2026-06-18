@@ -45,14 +45,20 @@ impl KWinEnv {
                 Err(_) => continue,
             };
 
-            if comm.trim() != "kwin_wayland" {
+            // Match "kwin_wayland" and "kwin_wayland_wrapper" (the latter is
+            // truncated to "kwin_wayland_wr" in comm by the 15-char kernel limit).
+            // On some distros the wrapper process owns the session environment
+            // while the inner kwin_wayland receives the socket via fd, so we
+            // try ALL matching processes and pick the first with both vars set.
+            if !comm.trim().starts_with("kwin_wayland") {
                 continue;
             }
 
-            // Process found — now read its environment.
-            // Failure here is a real error (the process exists but we cannot read it).
             let environ_path = format!("/proc/{}/environ", pid);
-            let raw = fs::read(&environ_path).map_err(StrategyError::Io)?;
+            let raw = match fs::read(&environ_path) {
+                Ok(b) => b,
+                Err(_) => continue, // process may have vanished
+            };
 
             let vars = parse_environ(&raw);
 
@@ -65,8 +71,9 @@ impl KWinEnv {
                 .cloned()
                 .unwrap_or_default();
 
+            // This candidate is missing the session vars — try the next one.
             if wayland_display.is_empty() || xdg_runtime_dir.is_empty() {
-                return Err(StrategyError::CompositorNotFound);
+                continue;
             }
 
             return Ok(KWinEnv {
