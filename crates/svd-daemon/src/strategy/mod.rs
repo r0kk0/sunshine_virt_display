@@ -1,3 +1,5 @@
+pub mod kwin;
+
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
