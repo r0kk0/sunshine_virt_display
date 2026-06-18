@@ -1,187 +1,239 @@
 # Sunshine Virtual Display
 
-This tool creates virtual displays that match the client's resolution and refresh rate when streaming via Sunshine.
-It runs as a persistent daemon and automatically manages display connections by overriding EDID information and toggling display status.
+Creates a virtual display that matches your streaming client's resolution and refresh rate when using [Sunshine](https://github.com/LizardByte/Sunshine) on KDE/KWin. The daemon runs as root, manipulates sysfs/debugfs to inject a custom EDID, and uses `kscreen-doctor` to manage outputs cooperatively through the compositor — no DRM master stealing.
 
-> ⚠️ Enable SSH before using this tool. If your display gets stuck, you can recover by running `sudo systemctl stop sunshineVD` or sending `--disconnect` to the socket.
+> ⚠️ **Enable SSH before using this.** If your display gets stuck, recover via `sudo svd disconnect` or `sudo systemctl stop sunshine-vd`.
 
-## Upgrading from v1
-
-v2 replaces the shell script with a persistent daemon. Three things to do when upgrading:
-
-**1. Update your Sunshine commands.** The old `virt_display.sh --connect ...` commands no longer exist. Replace them with the socket-based commands in the [Configure Sunshine](#configure-sunshine) section below.
-
-**2. Remove the old sudoers entry.** v1 required a `NOPASSWD` rule for `python3 main.py`. It is no longer needed — delete it:
-
-```bash
-sudo visudo
-# Remove the line that contains sunshine_virt_display/main.py
-```
-
-**3. Install and start the daemon.** v2 requires the `sunshineVD` service to be running or Sunshine's commands will silently do nothing:
-
-```bash
-sudo ./install.sh
-```
+---
 
 ## Requirements
 
-- Python 3
-- `jeepney` Python package (installed automatically by `install.sh`)
-- debugfs mounted at `/sys/kernel/debug/`
+- KDE Plasma with KWin (Wayland session)
+- `kscreen-doctor` in PATH (comes with KDE, verify with `kscreen-doctor --version`)
+- `debugfs` mounted at `/sys/kernel/debug/` (standard on most distros)
+- Rust toolchain (`cargo`)
 - systemd
 
-## Installation
+Works on Intel, AMD, and NVIDIA GPUs.
 
-Clone the repo:
+---
+
+## Installation
 
 ```bash
 git clone https://github.com/frostplexx/sunshine_virt_display
 cd sunshine_virt_display
+sudo ./install.sh          # builds release binaries + installs systemd service
 ```
 
-Run the install script as root:
+The installer:
+1. Builds `svd-daemon` and `svd` in release mode
+2. Copies them to `/usr/local/bin/`
+3. Installs `deploy/sunshine-vd.service` to `/etc/systemd/system/`
+4. Runs `systemctl daemon-reload`
+
+Enable and start the daemon:
 
 ```bash
-sudo ./install.sh
-```
-
-This will:
-1. Install `jeepney` via pip
-2. Copy the project to `/opt/sunshine-vd/`
-3. Install and enable the `sunshineVD` systemd service
-
-The daemon starts automatically at boot and restarts if it crashes. To check it is running:
-
-```bash
-systemctl status sunshineVD
-journalctl -u sunshineVD -f
+sudo systemctl enable --now sunshine-vd
+systemctl status sunshine-vd
+journalctl -u sunshine-vd -f
 ```
 
 ### Updating
 
-Pull the latest changes and re-run the install script:
-
 ```bash
 git pull
 sudo ./install.sh
+sudo systemctl restart sunshine-vd
 ```
+
+---
 
 ## Configure Sunshine
 
-The daemon listens on `/tmp/sunshineVD.sock`. Sunshine talks to it by writing comma-separated arguments to that socket.
-
-In Sunshine's **General** tab, set:
+The daemon listens on `/run/sunshine-vd/svd.sock`. Configure Sunshine's **Do/Undo commands** in the **General** tab:
 
 **Do Command (On Client Connect):**
-
 ```bash
-sh -c "echo --connect,--width,${SUNSHINE_CLIENT_WIDTH},--height,${SUNSHINE_CLIENT_HEIGHT},--refresh-rate,${SUNSHINE_CLIENT_FPS} | nc -U /tmp/sunshineVD.sock"
+svd connect --width ${SUNSHINE_CLIENT_WIDTH} --height ${SUNSHINE_CLIENT_HEIGHT} --refresh ${SUNSHINE_CLIENT_FPS}
 ```
 
 **Undo Command (On Client Disconnect):**
-
 ```bash
-sh -c "echo --disconnect | nc -U /tmp/sunshineVD.sock"
+svd disconnect
 ```
 
-`nc -U` is provided by `openbsd-netcat` (available on most distros). If you prefer `socat`:
-
-```bash
-# Do Command
-sh -c "echo --connect,--width,${SUNSHINE_CLIENT_WIDTH},--height,${SUNSHINE_CLIENT_HEIGHT},--refresh-rate,${SUNSHINE_CLIENT_FPS} | socat - UNIX-CONNECT:/tmp/sunshineVD.sock"
-
-# Undo Command
-sh -c "echo --disconnect | socat - UNIX-CONNECT:/tmp/sunshineVD.sock"
-```
-
-### NVIDIA + Hyprland
-
-On NVIDIA/Hyprland systems, the daemon avoids directly stealing/reassigning CRTCs for physical outputs. Instead, it uses Hyprland monitor commands to hide physical displays while the virtual display is active, then restores the original monitor configuration on disconnect.
-
-The restore state is built from `hyprctl -j monitors`, preserving the live mode, position, scale, bit depth (8-bit/10-bit), and active VRR state reported by Hyprland.
+`svd` must be in PATH for the user running Sunshine, or use the full path `/usr/local/bin/svd`.
 
 ### Multi-GPU systems
 
-On systems with both an integrated GPU (iGPU) and a discrete GPU (dGPU), the daemon automatically selects the card with the most connected displays. Override with the `-d` flag if it picks the wrong one:
+The daemon automatically picks the GPU with the most connected displays. To force a specific card:
 
 ```bash
-sh -c "echo --connect,-d,card2,--width,${SUNSHINE_CLIENT_WIDTH},--height,${SUNSHINE_CLIENT_HEIGHT},--refresh-rate,${SUNSHINE_CLIENT_FPS} | nc -U /tmp/sunshineVD.sock"
+svd connect --width 1920 --height 1080 --refresh 60 --device card1
 ```
 
-To find the right card name, run the debug script and look at section 2 ("KMS connector/encoder/CRTC state") — each GPU is listed as `/dev/dri/cardN`.
+---
 
-## Development
-
-Use `make` to manage a dev-mode service that runs the daemon straight from the repo directory, so code changes take effect immediately on restart.
-
-**One-time setup:**
+## Manual Usage
 
 ```bash
-make dev-install
+# Check daemon status
+svd status
+
+# Connect a virtual display
+sudo svd connect --width 1920 --height 1080 --refresh 60
+
+# Disconnect
+sudo svd disconnect
+
+# Restore state after daemon restart
+sudo svd restore
+
+# JSON output (for scripting)
+svd status --json
 ```
 
-**Daily workflow:**
+`svd` sends commands to the daemon over the socket. The daemon must be running. Most operations (connect, disconnect) require the daemon to run as root, but the CLI itself can be run as any user that can reach the socket.
 
+---
+
+## Configuration
+
+Optional config file at `/etc/sunshine-vd/config.toml`:
+
+```toml
+# Seconds to wait for KWin to assign a CRTC to the virtual display (default: 30)
+output_ready_timeout_secs = 30
+
+# Additional resolutions beyond the built-in VIC table
+# [[extra_allowed_modes]]
+# width = 2560
+# height = 1440
+# refresh = 165
+
+# Force a specific DRM device (default: auto-select the card with most displays)
+# device = "card0"
+
+# Log level: "error", "warn", "info", "debug", "trace" (default: "info")
+log_level = "info"
+```
+
+Common resolutions (1080p, 1440p, 4K at standard refresh rates) are in the built-in VIC table. Add `extra_allowed_modes` for non-standard resolutions.
+
+---
+
+## What Happens Automatically
+
+### On connect
+
+1. Finds `kwin_wayland` PID, reads its session environment (`WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`)
+2. Generates a custom EDID matching the requested resolution/refresh
+3. Finds the first free DP or HDMI connector on the most-connected GPU
+4. Writes the EDID override via debugfs (`/sys/kernel/debug/dri/N/PORT/edid_override`)
+5. Clears stale KWin output config for that port
+6. Disables physical outputs via `kscreen-doctor output.X.disable`
+7. Enables the virtual connector via sysfs (`echo on > /sys/class/drm/cardN-PORT/status`)
+8. Waits up to `output_ready_timeout_secs` for KWin to assign a CRTC automatically
+9. If KWin doesn't assign: forces the mode via `kscreen-doctor output.PORT.mode.WxH@R`
+10. Saves state to `/var/lib/sunshine-vd/state.json`
+11. Spawns a crash-watcher thread monitoring the `sunshine` PID via `pidfd`
+
+### On disconnect
+
+1. Re-enables physical outputs via `kscreen-doctor output.X.enable`
+2. Disables virtual connector: `kscreen-doctor output.PORT.disable` + sysfs `echo off`
+3. Clears the EDID override
+4. Deletes the state file
+
+### If Sunshine crashes
+
+The crash-watcher thread detects Sunshine's exit via `pidfd_open` + `poll`. It automatically calls disconnect so your physical monitors come back without manual intervention.
+
+### On system sleep
+
+The daemon holds a systemd logind **sleep inhibitor delay lock** so the system waits for it before suspending. When sleep is triggered:
+1. Daemon disconnects the virtual display
+2. Releases the inhibitor (system proceeds to sleep)
+
+On wake, the inhibitor is re-acquired for the next sleep cycle. **Note**: automatic reconnect after wake is not yet implemented — after waking up, re-run `svd connect` or trigger Sunshine's Do Command again.
+
+### On shutdown / SIGTERM
+
+The daemon disconnects the virtual display before exiting, ensuring physical monitors are always restored even if Sunshine's Undo Command didn't run.
+
+---
+
+## Troubleshooting
+
+**`svd status` says "daemon not running"**
 ```bash
-make dev-start       # start the daemon
-make dev-logs        # follow journalctl output  (Ctrl-C to stop)
-make dev-status      # check if it's running
-
-# after editing code:
-make dev-restart
-
-make dev-stop        # stop the daemon
-make dev-uninstall   # remove the dev service entirely
+sudo systemctl start sunshine-vd
+journalctl -u sunshine-vd -n 50
 ```
 
-The dev service uses `Restart=no` so crashes surface immediately rather than being silently swallowed by an auto-restart loop.
+**Connect fails with "compositor not found"**
+- KWin must be running in a Wayland session
+- Check: `pgrep -a kwin_wayland`
 
-## How It Works
+**Connect fails with "kscreen-doctor not found"**
+- Install KDE Plasma tools: `sudo pacman -S plasma-workspace` (Arch) or equivalent
 
-### On Connect
+**Physical monitors don't come back after disconnect**
+```bash
+sudo svd disconnect   # try again; it's idempotent
+# Or manually:
+sudo systemctl restart sunshine-vd
+```
 
-1. Daemon receives `--connect` with width, height, and refresh rate
-2. Generates a custom EDID matching the client's display parameters
-3. Finds the first available empty display slot (prefers DisplayPort, falls back to HDMI)
-4. Overrides EDID for that slot via debugfs
-5. Releases CRTCs from and turns off all connected physical displays
-   - On NVIDIA/Hyprland, uses compositor-safe Hyprland monitor commands instead of direct DRM CRTC stealing
-6. Enables the virtual display
-7. Waits for the compositor to assign a CRTC, or forces one if it doesn't
-   - On NVIDIA/Hyprland, it refuses to force a direct DRM CRTC assignment and aborts instead
+**State file is stale after daemon crash**
+```bash
+sudo svd restore      # loads persisted state so disconnect works again
+sudo svd disconnect
+```
 
-### On Disconnect
+**Virtual display not assigned a mode**
+- Increase `output_ready_timeout_secs` in config
+- Verify: `kscreen-doctor -o` (should show the new virtual output)
 
-1. Daemon receives `--disconnect`
-2. Turns physical displays back on and forces CRTC assignment
-   - On NVIDIA/Hyprland, restores the saved live Hyprland monitor specs from `hyprctl -j monitors`
-3. Releases the CRTC from and turns off the virtual display
+**Daemon logs**
+```bash
+journalctl -u sunshine-vd -f          # follow logs
+journalctl -u sunshine-vd --since "5 min ago"
+# Enable debug logging:
+RUST_LOG=debug sudo svd-daemon --verbose
+```
 
-### On Sunshine Crash or Stop
+---
 
-The daemon watches `sunshine.service` via the systemd DBus interface. When Sunshine's `ActiveState` becomes `inactive` or `failed`, the daemon automatically disconnects the virtual display so physical monitors are restored without manual intervention.
+## Known Limitations
 
-### On System Sleep / Wake
+- **Reconnect after wake**: not automatic — must re-run connect manually
+- **KDE only**: no Hyprland, no GNOME support in this version
+- **HDR**: not implemented (EDID 1.4 base only)
+- **Non-standard resolutions**: resolutions not in the VIC table must be added to `extra_allowed_modes` in config
+- **Single virtual display at a time**: only one virtual display can be connected simultaneously
 
-The daemon holds a systemd sleep inhibitor lock so it can clean up before the system suspends. On sleep it disconnects the virtual display; on wake it reconnects automatically if a session was active.
+---
 
-### On Shutdown
+## How the daemon is structured
 
-Both `PrepareForShutdown` (via DBus) and SIGTERM trigger a graceful disconnect before the process exits, so physical displays are restored even if Sunshine didn't send an undo command.
+```
+svd-daemon
+├── ipc/         Unix socket server (newline-delimited JSON)
+├── config.rs    TOML config with safe defaults
+├── handler.rs   RealHandler: translates IPC requests → strategy calls
+├── watcher.rs   Sunshine crash watcher (pidfd + poll)
+├── sleep.rs     Logind D-Bus sleep/wake handler + inhibitor
+└── strategy/
+    └── kwin/
+        ├── mod.rs      KWinStrategy (full DisplayStrategy impl)
+        ├── env.rs      Finds kwin_wayland PID, reads /proc environ
+        ├── edid.rs     EDID 1.4 generator
+        ├── sysfs.rs    /sys/class/drm + debugfs I/O
+        ├── kscreen.rs  kscreen-doctor subprocess wrapper
+        └── state.rs    JSON state persistence (atomic write)
+```
 
-## Known Issues
-
-- Everything appears small when a device with a Retina display connects
-- Disconnecting is sometimes slow (~15 s) but resolves on its own
-- On MacBooks with notches, the notch area cuts into content
-- Very high resolutions and refresh rates may not work due to EDID 1.4 pixel-clock limits
-- HDR causes the display to freeze and is disabled by default
-- Stuttering on some displays: Enable V-Sync and frame pacing in Moonlight.
-
-
-## Tested On
-
-- Bazzite
-- CachyOS
-- NixOS
+`svd` (CLI) connects to the daemon socket, sends the request, and prints the response. All the logic is in the daemon.
