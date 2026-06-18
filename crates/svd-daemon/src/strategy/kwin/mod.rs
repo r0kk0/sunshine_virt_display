@@ -40,14 +40,17 @@ fn read_uid(pid: u32) -> Result<u32, StrategyError> {
 pub struct KWinStrategy {
     state_path: PathBuf,
     output_ready_timeout_secs: u64,
+    /// Explicit list of connectors to disable on connect. Empty = auto-detect.
+    disable_outputs: Vec<String>,
     state: RwLock<Option<ConnectState>>,
 }
 
 impl KWinStrategy {
-    pub fn new(state_path: PathBuf, output_ready_timeout_secs: u64) -> Self {
+    pub fn new(state_path: PathBuf, output_ready_timeout_secs: u64, disable_outputs: Vec<String>) -> Self {
         KWinStrategy {
             state_path,
             output_ready_timeout_secs,
+            disable_outputs,
             state: RwLock::new(None),
         }
     }
@@ -92,13 +95,21 @@ impl DisplayStrategy for KWinStrategy {
         let uid = read_uid(kwin_env.pid)?;
         sysfs::clear_kwin_output_config(&slot, uid)?;
 
-        // Step 7: Record currently connected connectors.
-        let previous = sysfs::connected_connectors(&card)?;
+        // Step 7: Determine which connectors to disable.
+        // If disable_outputs is configured explicitly, use that list.
+        // Otherwise auto-detect all currently connected connectors on this card.
+        let previous: Vec<String> = if !self.disable_outputs.is_empty() {
+            self.disable_outputs.clone()
+        } else {
+            sysfs::connected_connectors(&card)?
+        };
 
-        // Step 8: Disable physical connectors.
+        // Step 8: Disable physical connectors via kscreen-doctor.
         for port in &previous {
             let arg = format!("output.{}.disable", port);
-            kscreen::run(&kwin_env, &[arg.as_str()])?;
+            if let Err(e) = kscreen::run(&kwin_env, &[arg.as_str()]) {
+                tracing::warn!(port, error = %e, "failed to disable output — continuing");
+            }
         }
 
         // Step 9: Enable the virtual slot via sysfs.

@@ -73,6 +73,12 @@ pub struct Config {
 
     /// Path to the state file. Default: "/var/lib/sunshine-vd/state.json".
     pub state_path: String,
+
+    /// Connectors to disable when a virtual display is connected.
+    /// Example: ["DP-1", "HDMI-A-2"]
+    /// If empty (default), all currently connected outputs on the selected card
+    /// are disabled automatically.
+    pub disable_outputs: Vec<String>,
 }
 
 impl Default for Config {
@@ -87,6 +93,7 @@ impl Default for Config {
             log_level: "info".to_string(),
             socket_path: "/run/sunshine-vd/svd.sock".to_string(),
             state_path: "/var/lib/sunshine-vd/state.json".to_string(),
+            disable_outputs: vec![],
         }
     }
 }

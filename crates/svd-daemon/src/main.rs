@@ -37,6 +37,7 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
     let strategy = Arc::new(KWinStrategy::new(
         std::path::PathBuf::from(&config.state_path),
         config.output_ready_timeout_secs,
+        config.disable_outputs.clone(),
     ));
 
     // Attempt to restore state from a previous run (daemon restart).
