@@ -141,8 +141,10 @@ pub fn generate(width: u32, height: u32, refresh_hz: u32) -> Vec<u8> {
     edid[71] = 0x18; // Non-interlaced, digital separate sync
 
     // ── Display product name descriptor (bytes 72–89) ────────────────────────
-    // Tag 0xFC = monitor name. Padded to 13 bytes with spaces + 0x0A terminator.
-    let name = b"Display      "; // 13 bytes
+    // Tag 0xFC = monitor name. Per EDID 1.4 spec: name string + 0x0A (LF) terminator
+    // + space padding to fill 13 bytes total.
+    // "Display" (7) + LF (1) + 5 spaces (5) = 13 bytes.
+    let name = b"Display\n     "; // 13 bytes: name + 0x0A + padding
     edid[72] = 0x00;
     edid[73] = 0x00;
     edid[74] = 0x00;
