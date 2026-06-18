@@ -5,7 +5,7 @@ pub mod state;
 pub mod sysfs;
 
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::strategy::kwin::state::ConnectState;
@@ -48,6 +48,7 @@ pub struct KWinStrategy {
     /// Empty = don't disable anything unless --exclusive is set.
     disable_outputs: Vec<String>,
     default_device: Option<String>,
+    operation: Mutex<()>,
     state: RwLock<Option<ConnectState>>,
 }
 
@@ -63,13 +64,94 @@ impl KWinStrategy {
             output_ready_timeout_secs,
             disable_outputs,
             default_device,
+            operation: Mutex::new(()),
             state: RwLock::new(None),
+        }
+    }
+
+    fn cache(&self, state: Option<ConnectState>) {
+        *self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+    }
+
+    fn cleanup_state(
+        &self,
+        state: &ConnectState,
+        kwin_env: Option<&env::KWinEnv>,
+    ) -> Result<(), StrategyError> {
+        let mut first_error = None;
+        if let Some(kwin_env) = kwin_env {
+            let args = build_restore_args(state);
+            let args_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            if let Err(error) = kscreen::run_twice(kwin_env, &args_refs, 500) {
+                first_error = Some(error);
+            }
+        } else {
+            first_error = Some(StrategyError::CompositorNotFound);
+        }
+        if let Err(error) =
+            sysfs::set_connector_status(state.card.as_str(), state.virtual_port.as_str(), false)
+        {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) =
+            sysfs::clear_edid_override(state.card.as_str(), state.virtual_port.as_str())
+        {
+            first_error.get_or_insert(error);
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    fn failed_connect(
+        &self,
+        mut state: ConnectState,
+        kwin_env: &env::KWinEnv,
+        source: StrategyError,
+    ) -> StrategyError {
+        match self.cleanup_state(&state, Some(kwin_env)) {
+            Ok(()) => {
+                let _ = ConnectState::delete(&self.state_path);
+                self.cache(None);
+                source
+            }
+            Err(cleanup) => {
+                state.phase = LifecyclePhase::RecoveryRequired;
+                let persist = state.save(&self.state_path).err();
+                self.cache(Some(state));
+                StrategyError::Other(format!(
+                    "connect failed: {source}; rollback failed: {cleanup}{}",
+                    persist
+                        .map(|error| format!("; journal update failed: {error}"))
+                        .unwrap_or_default()
+                ))
+            }
         }
     }
 }
 
+fn build_restore_args(state: &ConnectState) -> Vec<String> {
+    let mut args = Vec::new();
+    for output in &state.previous_layout {
+        if output.name != state.virtual_port.as_str() && output.enabled {
+            args.push(format!(
+                "output.{}.position.{},{}",
+                output.name, output.x, output.y
+            ));
+            args.push(format!("output.{}.enable", output.name));
+        }
+    }
+    args.push(format!("output.{}.disable", state.virtual_port.as_str()));
+    args
+}
+
 impl DisplayStrategy for KWinStrategy {
     fn connect(&self, params: &ConnectParams) -> Result<ConnectResult, StrategyError> {
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Guard: refuse if already connected to give a clear error instead of NoSlot.
         {
             let guard = self.state.read().unwrap();
@@ -108,45 +190,57 @@ impl DisplayStrategy for KWinStrategy {
         // Step 4: Generate EDID.
         let edid_bytes = edid::generate(params.width, params.height, params.refresh);
 
-        // Step 5: Write EDID override.
-        sysfs::write_edid_override(&card, &slot, &edid_bytes)?;
-
-        // Step 6: Clear stale KWin output config.
-        let uid = read_uid(kwin_env.pid)?;
-        sysfs::clear_kwin_output_config(&slot, uid)?;
-
-        // Step 7: Snapshot current layout before any changes.
-        // This is saved in state and used on disconnect to restore exact positions.
-        let layout_snapshot: Vec<kscreen::OutputInfo> = kscreen::list_outputs(&kwin_env)
-            .map(|raw| kscreen::parse_outputs(&raw))
-            .unwrap_or_default();
-
-        tracing::debug!(
-            outputs = layout_snapshot.len(),
-            "layout snapshot taken before connect"
-        );
-
-        // Step 8: Determine which connectors to disable.
-        //
-        // --exclusive: disable all currently-enabled physical outputs (auto-detect).
-        // disable_outputs config (non-empty): disable only those specific connectors.
-        // Neither: don't disable anything — just add the virtual display alongside.
+        // Snapshot and journal recovery intent before the first display mutation.
+        let layout_snapshot = kscreen::parse_outputs(&kscreen::list_outputs(&kwin_env)?);
         let to_disable: Vec<String> = if params.exclusive {
             layout_snapshot
                 .iter()
-                .filter(|o| o.enabled && o.name != slot)
-                .map(|o| o.name.clone())
+                .filter(|output| output.enabled && output.name != slot)
+                .map(|output| output.name.clone())
                 .collect()
         } else {
             self.disable_outputs.clone()
         };
+        let mut cs = ConnectState {
+            schema_version: state::CURRENT_SCHEMA_VERSION,
+            phase: LifecyclePhase::Connecting,
+            card: CardId::try_from(card.as_str())
+                .map_err(|error| StrategyError::Other(error.into()))?,
+            virtual_port: ConnectorId::try_from(slot.as_str())
+                .map_err(|error| StrategyError::Other(error.into()))?,
+            mode: Mode {
+                width: params.width,
+                height: params.height,
+                refresh: params.refresh,
+            },
+            session_uid: kwin_env.uid,
+            previous_layout: layout_snapshot,
+        };
+        cs.save(&self.state_path)?;
+        self.cache(Some(cs.clone()));
+
+        // Step 5: Write EDID override.
+        if let Err(error) = sysfs::write_edid_override(&card, &slot, &edid_bytes) {
+            return Err(self.failed_connect(cs, &kwin_env, error));
+        }
+
+        // Step 6: Clear stale KWin output config.
+        let uid = read_uid(kwin_env.pid)?;
+        if let Err(error) = sysfs::clear_kwin_output_config(&slot, uid) {
+            return Err(self.failed_connect(cs, &kwin_env, error));
+        }
+
+        tracing::debug!(
+            outputs = cs.previous_layout.len(),
+            "layout snapshot taken before connect"
+        );
 
         // Step 9: Disable selected physical connectors via kscreen-doctor.
         // Double-run: KWin needs two passes to fully settle the layout.
         for port in &to_disable {
             let arg = format!("output.{}.disable", port);
-            if let Err(e) = kscreen::run_twice(&kwin_env, &[arg.as_str()], 400) {
-                tracing::warn!(port, error = %e, "failed to disable output — continuing");
+            if let Err(error) = kscreen::run_twice(&kwin_env, &[arg.as_str()], 400) {
+                return Err(self.failed_connect(cs, &kwin_env, error));
             }
         }
         if !to_disable.is_empty() {
@@ -155,7 +249,9 @@ impl DisplayStrategy for KWinStrategy {
         }
 
         // Step 10: Enable virtual slot via sysfs.
-        sysfs::set_connector_status(&card, &slot, true)?;
+        if let Err(error) = sysfs::set_connector_status(&card, &slot, true) {
+            return Err(self.failed_connect(cs, &kwin_env, error));
+        }
 
         // Step 11: Wait for KWin to detect the virtual connector in its output list.
         let timeout = Duration::from_secs(self.output_ready_timeout_secs);
@@ -172,10 +268,7 @@ impl DisplayStrategy for KWinStrategy {
             }
         }
         if !appeared {
-            tracing::warn!(
-                slot = %slot,
-                "virtual display not detected by KWin within timeout; attempting kscreen-doctor anyway"
-            );
+            return Err(self.failed_connect(cs, &kwin_env, StrategyError::Timeout));
         }
 
         // Step 12: Compute where to place the virtual display.
@@ -201,39 +294,36 @@ impl DisplayStrategy for KWinStrategy {
         );
         let pos_arg = format!("output.{}.position.{},{}", slot, virtual_x, 0);
         let enable_arg = format!("output.{}.enable", slot);
-        if let Err(e) = kscreen::run_twice(
+        if let Err(error) = kscreen::run_twice(
             &kwin_env,
             &[mode_arg.as_str(), pos_arg.as_str(), enable_arg.as_str()],
             500,
         ) {
-            tracing::warn!(error = %e, "kscreen-doctor failed to enable virtual display");
+            return Err(self.failed_connect(cs, &kwin_env, error));
         }
 
-        // Step 14: Build ConnectState with full layout snapshot.
-        let cs = ConnectState {
-            schema_version: state::CURRENT_SCHEMA_VERSION,
-            phase: LifecyclePhase::Connected,
-            card: CardId::try_from(card.as_str())
-                .map_err(|error| StrategyError::Other(error.into()))?,
-            virtual_port: ConnectorId::try_from(slot.as_str())
-                .map_err(|error| StrategyError::Other(error.into()))?,
-            mode: Mode {
-                width: params.width,
-                height: params.height,
-                refresh: params.refresh,
-            },
-            session_uid: kwin_env.uid,
-            previous_layout: layout_snapshot,
-        };
+        let verified = kscreen::list_outputs(&kwin_env)
+            .map(|raw| {
+                kscreen::parse_outputs(&raw).into_iter().any(|output| {
+                    output.name == slot
+                        && output.enabled
+                        && output.width == params.width
+                        && output.height == params.height
+                })
+            })
+            .unwrap_or(false);
+        if !verified {
+            return Err(self.failed_connect(cs, &kwin_env, StrategyError::Timeout));
+        }
 
         // Step 15: Save state.
-        cs.save(&self.state_path)?;
+        cs.phase = LifecyclePhase::Connected;
+        if let Err(error) = cs.save(&self.state_path) {
+            return Err(self.failed_connect(cs, &kwin_env, error.into()));
+        }
 
         // Step 16: Cache in self.state.
-        {
-            let mut guard = self.state.write().unwrap();
-            *guard = Some(cs);
-        }
+        self.cache(Some(cs));
 
         // Step 17: Return result.
         Ok(ConnectResult {
@@ -244,166 +334,66 @@ impl DisplayStrategy for KWinStrategy {
     }
 
     fn disconnect(&self) -> Result<(), StrategyError> {
-        // Step 1: Read state — if None, not connected.
-        let cs = {
-            let guard = self.state.read().unwrap();
-            match guard.as_ref() {
-                Some(s) => s.clone(),
-                None => return Err(StrategyError::NotConnected),
-            }
-        };
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or(StrategyError::NotConnected)?;
+        state.phase = LifecyclePhase::Disconnecting;
+        state.save(&self.state_path)?;
+        self.cache(Some(state.clone()));
 
-        // Step 2: Detect KWin env fresh (best-effort — KWin may have restarted).
-        // Failure here must NOT abort cleanup: sysfs and state-file steps do not
-        // need the kwin env and must always run.
-        let kwin_env = match env::KWinEnv::detect() {
-            Ok(e) => Some(e),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "KWin not found during disconnect; skipping kscreen calls, continuing cleanup"
-                );
-                None
-            }
-        };
-
-        // Step 3: Restore previous layout atomically in one kscreen-doctor call.
-        // previous_layout holds the full pre-connect snapshot (positions + enabled
-        // state). Build one atomic command that re-enables what was enabled and
-        // repositions everything, then disables the virtual port.
-        if let Some(ref env) = kwin_env {
-            let mut restore_args: Vec<String> = Vec::new();
-
-            if !cs.previous_layout.is_empty() {
-                for output in &cs.previous_layout {
-                    if output.name == cs.virtual_port.as_str() {
-                        continue; // virtual port is cleaned up via sysfs below
-                    }
-                    if output.enabled {
-                        restore_args.push(format!(
-                            "output.{}.position.{},{}",
-                            output.name, output.x, output.y
-                        ));
-                        restore_args.push(format!("output.{}.enable", output.name));
-                    }
-                }
-            }
-
-            // Always disable the virtual port as part of the atomic restore.
-            restore_args.push(format!("output.{}.disable", cs.virtual_port.as_str()));
-
-            if !restore_args.is_empty() {
-                let args_refs: Vec<&str> = restore_args.iter().map(|s| s.as_str()).collect();
-                if let Err(e) = kscreen::run_twice(env, &args_refs, 500) {
-                    tracing::warn!(
-                        error = %e,
-                        "kscreen layout restore failed; continuing cleanup"
-                    );
-                }
-            }
+        let kwin_env = env::KWinEnv::detect_for_uid(Some(state.session_uid)).ok();
+        if let Err(error) = self.cleanup_state(&state, kwin_env.as_ref()) {
+            state.phase = LifecyclePhase::RecoveryRequired;
+            state.save(&self.state_path)?;
+            self.cache(Some(state));
+            return Err(error);
         }
 
-        // Step 4: Set connector status to off via sysfs (best-effort).
-        if let Err(e) =
-            sysfs::set_connector_status(cs.card.as_str(), cs.virtual_port.as_str(), false)
-        {
-            tracing::warn!(
-                error = %e,
-                "failed to set sysfs connector status to off; continuing"
-            );
-        }
-
-        // Step 5: Clear EDID override (best-effort).
-        if let Err(e) = sysfs::clear_edid_override(cs.card.as_str(), cs.virtual_port.as_str()) {
-            tracing::warn!(
-                error = %e,
-                "failed to clear EDID override; continuing"
-            );
-        }
-
-        // Step 6: Delete state file (best-effort — cache clear must still run).
-        if let Err(e) = ConnectState::delete(&self.state_path) {
-            tracing::warn!(
-                error = %e,
-                "failed to delete state file during disconnect; continuing"
-            );
-        }
-
-        // Step 7: Clear self.state cache.
-        {
-            let mut guard = self.state.write().unwrap();
-            *guard = None;
-        }
-
+        ConnectState::delete(&self.state_path)?;
+        self.cache(None);
         Ok(())
     }
 
     fn restore(&self) -> Result<(), StrategyError> {
-        // Load state file; nothing to do on a clean start.
-        let cs = match ConnectState::load(&self.state_path)? {
-            Some(cs) => cs,
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = match ConnectState::load(&self.state_path)? {
+            Some(state) => state,
             None => return Ok(()),
         };
+        let kwin_env = env::KWinEnv::detect_for_uid(Some(state.session_uid)).ok();
+        let active = kwin_env
+            .as_ref()
+            .and_then(|environment| kscreen::list_outputs(environment).ok())
+            .map(|raw| {
+                kscreen::parse_outputs(&raw)
+                    .into_iter()
+                    .any(|output| output.name == state.virtual_port.as_str() && output.enabled)
+            })
+            .unwrap_or(false);
 
-        // Verify the virtual display is still active in KWin.
-        // If the daemon crashed while connected, KWin may have already removed
-        // the output — the state file is stale and must be cleaned up so
-        // find_empty_slot() can offer the slot again on the next connect().
-        let is_active = match env::KWinEnv::detect() {
-            Ok(kwin_env) => kscreen::list_outputs(&kwin_env)
-                .ok()
-                .map(|raw| {
-                    kscreen::parse_outputs(&raw)
-                        .into_iter()
-                        .any(|o| o.name == cs.virtual_port.as_str() && o.enabled)
-                })
-                .unwrap_or(false),
-            Err(_) => false,
-        };
-
-        if is_active {
-            tracing::info!(
-                card = %cs.card,
-                connector = %cs.virtual_port,
-                "virtual display still active — restoring daemon state"
-            );
-            let mut guard = self.state.write().unwrap();
-            *guard = Some(cs);
-        } else {
-            // Stale state: virtual display no longer enabled in KWin.
-            // Clean up sysfs/EDID so the slot is free for the next connect().
-            tracing::info!(
-                card = %cs.card,
-                connector = %cs.virtual_port,
-                "stale virtual display state detected — cleaning up on startup"
-            );
-
-            // Tell KWin to remove the output (best-effort, KWin may be gone).
-            if let Ok(kwin_env) = env::KWinEnv::detect() {
-                let disable_arg = format!("output.{}.disable", cs.virtual_port.as_str());
-                let _ = kscreen::run(&kwin_env, &[disable_arg.as_str()]);
-            }
-
-            // Reset sysfs status so find_empty_slot() sees the slot as free.
-            if let Err(e) =
-                sysfs::set_connector_status(cs.card.as_str(), cs.virtual_port.as_str(), false)
-            {
-                tracing::warn!(error = %e, "stale cleanup: failed to set sysfs status to off");
-            }
-
-            // Remove the EDID override so the kernel stops reporting the connector.
-            if let Err(e) = sysfs::clear_edid_override(cs.card.as_str(), cs.virtual_port.as_str()) {
-                tracing::warn!(error = %e, "stale cleanup: failed to clear EDID override");
-            }
-
-            // Delete the state file — next connect() starts fresh.
-            if let Err(e) = ConnectState::delete(&self.state_path) {
-                tracing::warn!(error = %e, "stale cleanup: failed to delete state file");
-            }
-
-            // State cache remains None.
+        if state.phase == LifecyclePhase::Connected && active {
+            self.cache(Some(state));
+            return Ok(());
         }
 
+        if let Err(error) = self.cleanup_state(&state, kwin_env.as_ref()) {
+            state.phase = LifecyclePhase::RecoveryRequired;
+            state.save(&self.state_path)?;
+            self.cache(Some(state));
+            return Err(error);
+        }
+        ConnectState::delete(&self.state_path)?;
+        self.cache(None);
         Ok(())
     }
 
@@ -411,7 +401,8 @@ impl DisplayStrategy for KWinStrategy {
         let guard = self.state.read().unwrap();
         match guard.as_ref() {
             Some(cs) => StrategyStatus {
-                connected: true,
+                phase: cs.phase,
+                connected: cs.phase == LifecyclePhase::Connected,
                 card: Some(cs.card.to_string()),
                 connector: Some(cs.virtual_port.to_string()),
                 mode: Some(format!(
@@ -421,6 +412,7 @@ impl DisplayStrategy for KWinStrategy {
                 strategy: Some("kwin".into()),
             },
             None => StrategyStatus {
+                phase: LifecyclePhase::Disconnected,
                 connected: false,
                 card: None,
                 connector: None,
@@ -428,5 +420,44 @@ impl DisplayStrategy for KWinStrategy {
                 strategy: Some("kwin".into()),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::strategy::kwin::kscreen::OutputInfo;
+
+    #[test]
+    fn restore_arguments_enable_physical_outputs_before_disabling_virtual() {
+        let state = ConnectState {
+            schema_version: state::CURRENT_SCHEMA_VERSION,
+            phase: LifecyclePhase::Disconnecting,
+            card: CardId::try_from("card0").unwrap(),
+            virtual_port: ConnectorId::try_from("DP-3").unwrap(),
+            mode: Mode {
+                width: 1920,
+                height: 1080,
+                refresh: 60,
+            },
+            session_uid: 1000,
+            previous_layout: vec![OutputInfo {
+                name: "DP-1".into(),
+                enabled: true,
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }],
+        };
+
+        assert_eq!(
+            build_restore_args(&state),
+            vec![
+                "output.DP-1.position.-1920,0",
+                "output.DP-1.enable",
+                "output.DP-3.disable",
+            ]
+        );
     }
 }

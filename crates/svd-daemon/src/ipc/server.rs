@@ -125,6 +125,7 @@ impl RequestHandler for StubHandler {
         match req {
             Request::Status {} => Response::Status {
                 ok: true,
+                phase: svd_proto::LifecyclePhase::Disconnected,
                 connected: false,
                 card: None,
                 connector: None,

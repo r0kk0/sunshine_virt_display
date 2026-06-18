@@ -197,6 +197,7 @@ impl RequestHandler for CredentialHandler {
         *self.0.lock().expect("credential lock") = Some(context);
         svd_proto::Response::Status {
             ok: true,
+            phase: svd_proto::LifecyclePhase::Disconnected,
             connected: false,
             card: None,
             connector: None,

@@ -78,6 +78,7 @@ impl RequestHandler for RealHandler {
                 },
                 Request::Status {} => Response::Status {
                     ok: false,
+                    phase: svd_proto::LifecyclePhase::Disconnected,
                     connected: false,
                     card: None,
                     connector: None,
@@ -168,6 +169,7 @@ impl RequestHandler for RealHandler {
                 let s = self.strategy.status();
                 Response::Status {
                     ok: true,
+                    phase: s.phase,
                     connected: s.connected,
                     card: s.card,
                     connector: s.connector,

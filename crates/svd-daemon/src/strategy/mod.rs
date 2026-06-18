@@ -25,6 +25,7 @@ pub struct ConnectResult {
 
 #[derive(Debug, Clone)]
 pub struct StrategyStatus {
+    pub phase: svd_proto::LifecyclePhase,
     pub connected: bool,
     pub card: Option<String>,
     pub connector: Option<String>,

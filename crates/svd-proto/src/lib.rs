@@ -62,6 +62,7 @@ pub enum Response {
     },
     Status {
         ok: bool,
+        phase: LifecyclePhase,
         connected: bool,
         card: Option<String>,
         connector: Option<String>,
