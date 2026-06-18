@@ -170,32 +170,47 @@ impl DisplayStrategy for KWinStrategy {
             }
         };
 
-        // Step 3: Detect KWin env fresh.
-        let kwin_env = env::KWinEnv::detect()?;
-
-        // Step 3 continued: Re-enable physical connectors (best-effort).
-        for port in &cs.previous_ports {
-            let arg = format!("output.{}.enable", port);
-            if let Err(e) = kscreen::run(&kwin_env, &[arg.as_str()]) {
+        // Step 3: Detect KWin env fresh (best-effort — KWin may have restarted).
+        // Failure here must NOT abort cleanup: sysfs and state-file steps do not
+        // need the kwin env and must always run.
+        let kwin_env = match env::KWinEnv::detect() {
+            Ok(e) => Some(e),
+            Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    port = %port,
-                    "failed to re-enable physical connector during disconnect; continuing"
+                    "KWin not found during disconnect; skipping kscreen calls, continuing cleanup"
                 );
+                None
+            }
+        };
+
+        // Step 3 continued: Re-enable physical connectors (best-effort).
+        if let Some(ref env) = kwin_env {
+            for port in &cs.previous_ports {
+                let arg = format!("output.{}.enable", port);
+                if let Err(e) = kscreen::run(env, &[arg.as_str()]) {
+                    tracing::warn!(
+                        error = %e,
+                        port = %port,
+                        "failed to re-enable physical connector during disconnect; continuing"
+                    );
+                }
             }
         }
 
         // Step 4a: Disable virtual slot (best-effort).
-        let disable_arg = format!("output.{}.disable", cs.virtual_port);
-        if let Err(e) = kscreen::run(&kwin_env, &[disable_arg.as_str()]) {
-            tracing::warn!(
-                error = %e,
-                port = %cs.virtual_port,
-                "failed to disable virtual connector during disconnect; continuing"
-            );
+        if let Some(ref env) = kwin_env {
+            let disable_arg = format!("output.{}.disable", cs.virtual_port);
+            if let Err(e) = kscreen::run(env, &[disable_arg.as_str()]) {
+                tracing::warn!(
+                    error = %e,
+                    port = %cs.virtual_port,
+                    "failed to disable virtual connector during disconnect; continuing"
+                );
+            }
         }
 
-        // Step 4b: Set connector status to off via sysfs.
+        // Step 4b: Set connector status to off via sysfs (best-effort).
         if let Err(e) = sysfs::set_connector_status(&cs.card, &cs.virtual_port, false) {
             tracing::warn!(
                 error = %e,
@@ -203,7 +218,7 @@ impl DisplayStrategy for KWinStrategy {
             );
         }
 
-        // Step 5: Clear EDID override.
+        // Step 5: Clear EDID override (best-effort).
         if let Err(e) = sysfs::clear_edid_override(&cs.card, &cs.virtual_port) {
             tracing::warn!(
                 error = %e,
@@ -211,8 +226,13 @@ impl DisplayStrategy for KWinStrategy {
             );
         }
 
-        // Step 6: Delete state file.
-        ConnectState::delete(&self.state_path)?;
+        // Step 6: Delete state file (best-effort — cache clear must still run).
+        if let Err(e) = ConnectState::delete(&self.state_path) {
+            tracing::warn!(
+                error = %e,
+                "failed to delete state file during disconnect; continuing"
+            );
+        }
 
         // Step 7: Clear self.state cache.
         {
