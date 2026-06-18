@@ -8,6 +8,9 @@ pub struct ConnectParams {
     pub height: u32,
     pub refresh: u32,
     pub device: Option<String>,
+    /// If true, disable all currently-active physical monitors before
+    /// connecting the virtual display (remote headless streaming mode).
+    pub exclusive: bool,
 }
 
 #[derive(Debug, Clone)]

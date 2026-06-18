@@ -76,7 +76,7 @@ impl RequestHandler for RealHandler {
 
         match req {
             // ── Connect ────────────────────────────────────────────────────────
-            Request::Connect { width, height, refresh, device, dry_run } => {
+            Request::Connect { width, height, refresh, device, dry_run, exclusive } => {
                 if dry_run {
                     return Response::Connect {
                         ok: true,
@@ -88,7 +88,7 @@ impl RequestHandler for RealHandler {
                     };
                 }
 
-                let params = ConnectParams { width, height, refresh, device };
+                let params = ConnectParams { width, height, refresh, device, exclusive };
                 match self.strategy.connect(&params) {
                     Ok(result) => {
                         // T5: Spawn crash watcher after a successful connect so that

@@ -57,6 +57,12 @@ enum Commands {
         /// Validate and print the request without actually connecting.
         #[arg(long)]
         dry_run: bool,
+
+        /// Disable all active physical monitors before connecting the virtual
+        /// display. Use for remote headless streaming. Without this flag,
+        /// physical monitors are left on alongside the virtual display.
+        #[arg(long)]
+        exclusive: bool,
     },
 
     /// Disconnect the virtual display.
@@ -75,8 +81,8 @@ enum Commands {
 
 fn build_request(cmd: Commands) -> Request {
     match cmd {
-        Commands::Connect { width, height, refresh, device, dry_run } => {
-            Request::Connect { width, height, refresh, device, dry_run }
+        Commands::Connect { width, height, refresh, device, dry_run, exclusive } => {
+            Request::Connect { width, height, refresh, device, dry_run, exclusive }
         }
         Commands::Disconnect => Request::Disconnect {},
         Commands::Status => Request::Status {},

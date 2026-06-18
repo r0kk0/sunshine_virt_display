@@ -1,8 +1,107 @@
 use std::io;
 use std::process::Command;
+use std::time::Duration;
 
 use crate::strategy::StrategyError;
 use crate::strategy::kwin::env::KWinEnv;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// OutputInfo — layout snapshot
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Snapshot of an output's state as reported by `kscreen-doctor -o`.
+///
+/// Used to save the full display layout before connect so that disconnect can
+/// restore exact positions and enabled states atomically.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OutputInfo {
+    /// Connector name, e.g. "DP-2".
+    pub name: String,
+    /// Whether the output is currently enabled.
+    pub enabled: bool,
+    /// Left edge x coordinate (can be negative for left-of-primary setups).
+    pub x: i32,
+    /// Top edge y coordinate.
+    pub y: i32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Layout parser
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Parse `kscreen-doctor -o` output into a list of [`OutputInfo`].
+///
+/// KDE Plasma 6 format:
+/// ```text
+/// Output: N NAME uuid
+///     enabled          ← or "disabled", on its own line
+///     connected
+///     Geometry: x,y WxH    ← space between pos and size, no '@', x can be negative
+/// ```
+/// Unknown lines are silently skipped — the parser is lenient so future
+/// kscreen-doctor format changes don't break the daemon.
+pub fn parse_outputs(text: &str) -> Vec<OutputInfo> {
+    let mut result: Vec<OutputInfo> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        if let Some(rest) = trimmed.strip_prefix("Output:") {
+            // "Output: N NAME uuid" — start a new output block.
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 2 {
+                result.push(OutputInfo {
+                    name: parts[1].to_string(),
+                    enabled: false,
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 0,
+                });
+            }
+        } else if trimmed == "enabled" {
+            if let Some(last) = result.last_mut() {
+                last.enabled = true;
+            }
+        } else if trimmed == "disabled" {
+            if let Some(last) = result.last_mut() {
+                last.enabled = false;
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("Geometry:") {
+            if let Some(last) = result.last_mut() {
+                if let Some((x, y, w, h)) = parse_geometry(rest.trim()) {
+                    last.x = x;
+                    last.y = y;
+                    last.width = w;
+                    last.height = h;
+                }
+            }
+        }
+    }
+
+    result
+}
+
+fn parse_geometry(s: &str) -> Option<(i32, i32, u32, u32)> {
+    // Format: "x,y WxH"  e.g. "-2560,0 2560x1440" or "0,0 1920x1080"
+    let (pos, size) = s.split_once(' ')?;
+    let (x_str, y_str) = pos.split_once(',')?;
+    let (w_str, h_str) = size.split_once('x')?;
+    Some((
+        x_str.parse().ok()?,
+        y_str.parse().ok()?,
+        w_str.parse().ok()?,
+        h_str.parse().ok()?,
+    ))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// kscreen-doctor subprocess
+// ──────────────────────────────────────────────────────────────────────────────
 
 /// Core implementation: spawn `binary` with `args` under the KWin session
 /// environment. Extracted so tests can inject an arbitrary binary name
@@ -60,6 +159,20 @@ pub fn list_outputs(env: &KWinEnv) -> Result<String, StrategyError> {
     run(env, &["-o"])
 }
 
+/// Run kscreen-doctor with `args` twice, sleeping `delay_ms` between passes.
+///
+/// KWin sometimes needs two kscreen-doctor invocations to fully apply a layout
+/// change: the first triggers KWin's internal reflow and the second commits the
+/// settled state. Errors on the first pass are logged and swallowed; only the
+/// second pass result is returned.
+pub fn run_twice(env: &KWinEnv, args: &[&str], delay_ms: u64) -> Result<String, StrategyError> {
+    if let Err(e) = run(env, args) {
+        tracing::debug!(error = %e, "run_twice: first pass failed");
+    }
+    std::thread::sleep(Duration::from_millis(delay_ms));
+    run(env, args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +195,56 @@ mod tests {
             "expected KscreenDoctor error, got: {:?}",
             result
         );
+    }
+
+    // ── parse_outputs tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_outputs_extracts_enabled_geometry() {
+        let text = "Output: 2 DP-2 some-uuid\n    enabled\n    connected\n    Geometry: 0,0 2560x1440\n    Scale: 1\n";
+        let outputs = parse_outputs(text);
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].name, "DP-2");
+        assert!(outputs[0].enabled);
+        assert_eq!(outputs[0].x, 0);
+        assert_eq!(outputs[0].y, 0);
+        assert_eq!(outputs[0].width, 2560);
+        assert_eq!(outputs[0].height, 1440);
+    }
+
+    #[test]
+    fn parse_outputs_negative_x_geometry() {
+        let text = "Output: 1 HDMI-A-1 uuid\n    disabled\n    Geometry: -2560,0 2560x1440\n";
+        let outputs = parse_outputs(text);
+        assert_eq!(outputs.len(), 1);
+        assert!(!outputs[0].enabled);
+        assert_eq!(outputs[0].x, -2560);
+        assert_eq!(outputs[0].y, 0);
+        assert_eq!(outputs[0].width, 2560);
+        assert_eq!(outputs[0].height, 1440);
+    }
+
+    #[test]
+    fn parse_outputs_multiple_outputs() {
+        let text = "Output: 1 DP-2 uuid1\n    enabled\n    Geometry: 0,0 2560x1440\nOutput: 2 DP-3 uuid2\n    enabled\n    Geometry: 2560,0 2560x1440\n";
+        let outputs = parse_outputs(text);
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].name, "DP-2");
+        assert_eq!(outputs[1].name, "DP-3");
+        assert_eq!(outputs[1].x, 2560);
+    }
+
+    #[test]
+    fn parse_outputs_disabled_output_has_enabled_false() {
+        let text = "Output: 4 DP-1 uuid\n    disabled\n    connected\n    Geometry: 0,0 1920x1080\n";
+        let outputs = parse_outputs(text);
+        assert_eq!(outputs.len(), 1);
+        assert!(!outputs[0].enabled);
+    }
+
+    #[test]
+    fn parse_outputs_empty_input() {
+        let outputs = parse_outputs("");
+        assert!(outputs.is_empty());
     }
 }

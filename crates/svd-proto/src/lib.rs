@@ -25,6 +25,11 @@ pub enum Request {
         device: Option<String>,
         #[serde(default)]
         dry_run: bool,
+        /// Disable all active physical monitors before connecting the virtual
+        /// display. Use for remote headless streaming. Without this flag,
+        /// physical monitors are left on.
+        #[serde(default)]
+        exclusive: bool,
     },
     /// Empty struct variants (not unit variants) so that `deny_unknown_fields`
     /// applies uniformly.  Wire format is unchanged: serializes as
@@ -198,7 +203,7 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     fn connect(width: u32, height: u32, refresh: u32) -> Request {
-        Request::Connect { width, height, refresh, device: None, dry_run: false }
+        Request::Connect { width, height, refresh, device: None, dry_run: false, exclusive: false }
     }
 
     fn connect_dev(width: u32, height: u32, refresh: u32, dev: &str) -> Request {
@@ -208,6 +213,7 @@ mod tests {
             refresh,
             device: Some(dev.to_owned()),
             dry_run: false,
+            exclusive: false,
         }
     }
 
@@ -219,7 +225,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&json).unwrap();
         match back {
-            Request::Connect { width, height, refresh, device, dry_run } => {
+            Request::Connect { width, height, refresh, device, dry_run, .. } => {
                 assert_eq!((width, height, refresh), (1920, 1080, 60));
                 assert_eq!(device, None);
                 assert!(!dry_run);
@@ -236,14 +242,16 @@ mod tests {
             refresh: 60,
             device: Some("card0".to_owned()),
             dry_run: true,
+            exclusive: true,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&json).unwrap();
         match back {
-            Request::Connect { width, height, refresh, device, dry_run } => {
+            Request::Connect { width, height, refresh, device, dry_run, exclusive } => {
                 assert_eq!((width, height, refresh), (1280, 720, 60));
                 assert_eq!(device.as_deref(), Some("card0"));
                 assert!(dry_run);
+                assert!(exclusive);
             }
             _ => panic!("wrong variant after round-trip"),
         }

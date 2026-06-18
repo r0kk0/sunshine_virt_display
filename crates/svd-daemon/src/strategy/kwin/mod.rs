@@ -40,7 +40,8 @@ fn read_uid(pid: u32) -> Result<u32, StrategyError> {
 pub struct KWinStrategy {
     state_path: PathBuf,
     output_ready_timeout_secs: u64,
-    /// Explicit list of connectors to disable on connect. Empty = auto-detect.
+    /// Explicit list of connectors to disable on connect (non-exclusive mode).
+    /// Empty = don't disable anything unless --exclusive is set.
     disable_outputs: Vec<String>,
     state: RwLock<Option<ConnectState>>,
 }
@@ -95,27 +96,49 @@ impl DisplayStrategy for KWinStrategy {
         let uid = read_uid(kwin_env.pid)?;
         sysfs::clear_kwin_output_config(&slot, uid)?;
 
-        // Step 7: Determine which connectors to disable.
-        // If disable_outputs is configured explicitly, use that list.
-        // Otherwise auto-detect all currently connected connectors on this card.
-        let previous: Vec<String> = if !self.disable_outputs.is_empty() {
-            self.disable_outputs.clone()
+        // Step 7: Snapshot current layout before any changes.
+        // This is saved in state and used on disconnect to restore exact positions.
+        let layout_snapshot: Vec<kscreen::OutputInfo> = kscreen::list_outputs(&kwin_env)
+            .map(|raw| kscreen::parse_outputs(&raw))
+            .unwrap_or_default();
+
+        tracing::debug!(
+            outputs = layout_snapshot.len(),
+            "layout snapshot taken before connect"
+        );
+
+        // Step 8: Determine which connectors to disable.
+        //
+        // --exclusive: disable all currently-enabled physical outputs (auto-detect).
+        // disable_outputs config (non-empty): disable only those specific connectors.
+        // Neither: don't disable anything — just add the virtual display alongside.
+        let to_disable: Vec<String> = if params.exclusive {
+            layout_snapshot
+                .iter()
+                .filter(|o| o.enabled && o.name != slot)
+                .map(|o| o.name.clone())
+                .collect()
         } else {
-            sysfs::connected_connectors(&card)?
+            self.disable_outputs.clone()
         };
 
-        // Step 8: Disable physical connectors via kscreen-doctor.
-        for port in &previous {
+        // Step 9: Disable selected physical connectors via kscreen-doctor.
+        // Double-run: KWin needs two passes to fully settle the layout.
+        for port in &to_disable {
             let arg = format!("output.{}.disable", port);
-            if let Err(e) = kscreen::run(&kwin_env, &[arg.as_str()]) {
+            if let Err(e) = kscreen::run_twice(&kwin_env, &[arg.as_str()], 400) {
                 tracing::warn!(port, error = %e, "failed to disable output — continuing");
             }
         }
+        if !to_disable.is_empty() {
+            // Extra settle time after batch disable.
+            std::thread::sleep(Duration::from_millis(300));
+        }
 
-        // Step 9: Enable the virtual slot via sysfs.
+        // Step 10: Enable virtual slot via sysfs.
         sysfs::set_connector_status(&card, &slot, true)?;
 
-        // Step 10: Wait for KWin to assign the connector.
+        // Step 11: Wait for KWin to detect the virtual connector in its output list.
         let timeout = Duration::from_secs(self.output_ready_timeout_secs);
         let start = Instant::now();
         let mut appeared = false;
@@ -129,19 +152,45 @@ impl DisplayStrategy for KWinStrategy {
                 _ => {}
             }
         }
-
         if !appeared {
-            // Timeout fallback: force the mode via kscreen-doctor.
-            let mode_arg = format!(
-                "output.{}.mode.{}x{}@{}",
-                slot, params.width, params.height, params.refresh
+            tracing::warn!(
+                slot = %slot,
+                "virtual display not detected by KWin within timeout; attempting kscreen-doctor anyway"
             );
-            kscreen::run(&kwin_env, &[mode_arg.as_str()])?;
-            let enable_arg = format!("output.{}.enable", slot);
-            kscreen::run(&kwin_env, &[enable_arg.as_str()])?;
         }
 
-        // Step 11: Build ConnectState.
+        // Step 12: Compute where to place the virtual display.
+        // Place it to the right of the rightmost currently-enabled output to
+        // avoid overlapping with physical monitors.
+        let virtual_x: i32 = kscreen::list_outputs(&kwin_env)
+            .ok()
+            .map(|raw| {
+                kscreen::parse_outputs(&raw)
+                    .into_iter()
+                    .filter(|o| o.enabled && o.name != slot)
+                    .map(|o| o.x + o.width as i32)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+
+        // Step 13: Enable virtual display with explicit mode and position.
+        // Double-run for KWin to apply the layout without overlapping outputs.
+        let mode_arg = format!(
+            "output.{}.mode.{}x{}@{}",
+            slot, params.width, params.height, params.refresh
+        );
+        let pos_arg = format!("output.{}.position.{},{}", slot, virtual_x, 0);
+        let enable_arg = format!("output.{}.enable", slot);
+        if let Err(e) = kscreen::run_twice(
+            &kwin_env,
+            &[mode_arg.as_str(), pos_arg.as_str(), enable_arg.as_str()],
+            500,
+        ) {
+            tracing::warn!(error = %e, "kscreen-doctor failed to enable virtual display");
+        }
+
+        // Step 14: Build ConnectState with full layout snapshot.
         let card_index = card.trim_start_matches("card");
         let edid_override_path = format!(
             "/sys/kernel/debug/dri/{}/{}/edid_override",
@@ -150,20 +199,21 @@ impl DisplayStrategy for KWinStrategy {
         let cs = ConnectState {
             card: card.clone(),
             virtual_port: slot.clone(),
-            previous_ports: previous,
+            previous_layout: layout_snapshot,
+            previous_ports: vec![],
             edid_override_path,
         };
 
-        // Step 12: Save state.
+        // Step 15: Save state.
         cs.save(&self.state_path)?;
 
-        // Step 13: Cache in self.state.
+        // Step 16: Cache in self.state.
         {
             let mut guard = self.state.write().unwrap();
             *guard = Some(cs);
         }
 
-        // Step 14: Return result.
+        // Step 17: Return result.
         Ok(ConnectResult {
             card,
             connector: slot.clone(),
@@ -181,7 +231,7 @@ impl DisplayStrategy for KWinStrategy {
             }
         };
 
-        // Step 3: Detect KWin env fresh (best-effort — KWin may have restarted).
+        // Step 2: Detect KWin env fresh (best-effort — KWin may have restarted).
         // Failure here must NOT abort cleanup: sysfs and state-file steps do not
         // need the kwin env and must always run.
         let kwin_env = match env::KWinEnv::detect() {
@@ -195,33 +245,48 @@ impl DisplayStrategy for KWinStrategy {
             }
         };
 
-        // Step 3 continued: Re-enable physical connectors (best-effort).
+        // Step 3: Restore previous layout atomically in one kscreen-doctor call.
+        // previous_layout holds the full pre-connect snapshot (positions + enabled
+        // state). Build one atomic command that re-enables what was enabled and
+        // repositions everything, then disables the virtual port.
         if let Some(ref env) = kwin_env {
-            for port in &cs.previous_ports {
-                let arg = format!("output.{}.enable", port);
-                if let Err(e) = kscreen::run(env, &[arg.as_str()]) {
+            let mut restore_args: Vec<String> = Vec::new();
+
+            if !cs.previous_layout.is_empty() {
+                for output in &cs.previous_layout {
+                    if output.name == cs.virtual_port {
+                        continue; // virtual port is cleaned up via sysfs below
+                    }
+                    if output.enabled {
+                        restore_args.push(format!(
+                            "output.{}.position.{},{}",
+                            output.name, output.x, output.y
+                        ));
+                        restore_args.push(format!("output.{}.enable", output.name));
+                    }
+                }
+            } else {
+                // Legacy fallback: no layout snapshot, just re-enable previous_ports.
+                for port in &cs.previous_ports {
+                    restore_args.push(format!("output.{}.enable", port));
+                }
+            }
+
+            // Always disable the virtual port as part of the atomic restore.
+            restore_args.push(format!("output.{}.disable", cs.virtual_port));
+
+            if !restore_args.is_empty() {
+                let args_refs: Vec<&str> = restore_args.iter().map(|s| s.as_str()).collect();
+                if let Err(e) = kscreen::run_twice(env, &args_refs, 500) {
                     tracing::warn!(
                         error = %e,
-                        port = %port,
-                        "failed to re-enable physical connector during disconnect; continuing"
+                        "kscreen layout restore failed; continuing cleanup"
                     );
                 }
             }
         }
 
-        // Step 4a: Disable virtual slot (best-effort).
-        if let Some(ref env) = kwin_env {
-            let disable_arg = format!("output.{}.disable", cs.virtual_port);
-            if let Err(e) = kscreen::run(env, &[disable_arg.as_str()]) {
-                tracing::warn!(
-                    error = %e,
-                    port = %cs.virtual_port,
-                    "failed to disable virtual connector during disconnect; continuing"
-                );
-            }
-        }
-
-        // Step 4b: Set connector status to off via sysfs (best-effort).
+        // Step 4: Set connector status to off via sysfs (best-effort).
         if let Err(e) = sysfs::set_connector_status(&cs.card, &cs.virtual_port, false) {
             tracing::warn!(
                 error = %e,
