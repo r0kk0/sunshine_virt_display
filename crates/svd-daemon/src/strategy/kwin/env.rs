@@ -28,6 +28,32 @@ fn read_socket_from_cmdline(pid: u32) -> Option<String> {
     None
 }
 
+fn select_wayland_socket<I, S>(names: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut sockets: Vec<String> = names
+        .into_iter()
+        .filter_map(|name| {
+            let name = name.as_ref();
+            let suffix = name.strip_prefix("wayland-")?;
+            (!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| name.to_owned())
+        })
+        .collect();
+    sockets.sort();
+    sockets.into_iter().next()
+}
+
+fn scan_wayland_socket(runtime_dir: &str) -> Option<String> {
+    let names = fs::read_dir(runtime_dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned());
+    select_wayland_socket(names)
+}
+
 /// Wayland session environment extracted from a running `kwin_wayland` process.
 #[derive(Debug, Clone)]
 pub struct KWinEnv {
@@ -111,19 +137,11 @@ impl KWinEnv {
                 continue;
             }
 
-            let environ_path = format!("/proc/{}/environ", pid);
-            let raw = match fs::read(&environ_path) {
-                Ok(b) => b,
-                Err(_) => continue, // process may have vanished
-            };
-
+            // Reading another user's environ/cmdline can require CAP_SYS_PTRACE.
+            // Treat both as optional hints and fall back to the owned runtime dir.
+            let raw = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
             let vars = parse_environ(&raw);
-
-            let xdg_runtime_dir = vars.get("XDG_RUNTIME_DIR").cloned().unwrap_or_default();
-
-            if xdg_runtime_dir != format!("/run/user/{uid}") {
-                continue;
-            }
+            let xdg_runtime_dir = format!("/run/user/{uid}");
 
             // KWin often does not set WAYLAND_DISPLAY in its own environment —
             // the socket name is passed via --socket <name> on the command line.
@@ -133,7 +151,9 @@ impl KWinEnv {
                 if !from_env.is_empty() {
                     from_env
                 } else {
-                    read_socket_from_cmdline(pid).unwrap_or_else(|| "wayland-0".into())
+                    read_socket_from_cmdline(pid)
+                        .or_else(|| scan_wayland_socket(&xdg_runtime_dir))
+                        .unwrap_or_else(|| "wayland-0".into())
                 }
             };
             if wayland_display.is_empty()
@@ -241,5 +261,11 @@ mod tests {
     #[test]
     fn parse_process_ids_rejects_missing_fields() {
         assert_eq!(parse_process_ids("Uid:\t1000\t1000\n"), None);
+    }
+
+    #[test]
+    fn wayland_socket_selector_ignores_locks_and_unrelated_names() {
+        let names = ["pipewire-0", "wayland-1.lock", "wayland-2", "wayland-0"];
+        assert_eq!(select_wayland_socket(names), Some("wayland-0".into()));
     }
 }
