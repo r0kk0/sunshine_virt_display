@@ -1,0 +1,52 @@
+use thiserror::Error;
+
+#[derive(Debug, Clone)]
+pub struct ConnectParams {
+    pub width: u32,
+    pub height: u32,
+    pub refresh: u32,
+    pub device: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectResult {
+    pub card: String,
+    pub connector: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StrategyStatus {
+    pub connected: bool,
+    pub card: Option<String>,
+    pub connector: Option<String>,
+    pub mode: Option<String>,
+    pub strategy: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum StrategyError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("no suitable DRM card found")]
+    NoCard,
+    #[error("no empty display slot available")]
+    NoSlot,
+    #[error("kscreen-doctor not found or failed: {0}")]
+    KscreenDoctor(String),
+    #[error("compositor (KWin) not found")]
+    CompositorNotFound,
+    #[error("connect timeout waiting for CRTC assignment")]
+    Timeout,
+    #[error("not connected (no state file)")]
+    NotConnected,
+    #[error("{0}")]
+    Other(String),
+}
+
+pub trait DisplayStrategy: Send + Sync {
+    fn connect(&self, params: &ConnectParams) -> Result<ConnectResult, StrategyError>;
+    fn disconnect(&self) -> Result<(), StrategyError>;
+    fn restore(&self) -> Result<(), StrategyError>;
+    fn status(&self) -> StrategyStatus;
+}
