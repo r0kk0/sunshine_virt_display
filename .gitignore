@@ -5,3 +5,6 @@ virt_display.state
 
 # Rust build artifacts
 target/
+
+# Local isolated development worktrees
+.worktrees/
