@@ -7,5 +7,6 @@ pub mod config;
 pub mod error;
 pub mod handler;
 pub mod ipc;
+pub mod sleep;
 pub mod strategy;
 pub mod watcher;

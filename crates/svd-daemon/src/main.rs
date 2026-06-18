@@ -14,6 +14,7 @@ use svd_daemon::{
     error::DaemonError,
     handler::RealHandler,
     ipc::{run_server, RequestHandler, ServerError},
+    sleep::spawn_sleep_handler,
     strategy::{DisplayStrategy, kwin::KWinStrategy},
 };
 
@@ -52,11 +53,19 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
     signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
         .expect("signal registration");
 
+    // Clone the strategy Arc before it is moved into RealHandler so that the
+    // sleep handler can share the same strategy instance.
+    let sleep_strategy: Arc<dyn DisplayStrategy> = strategy.clone();
+
     let handler: Arc<dyn RequestHandler> = Arc::new(RealHandler::new(
         strategy,
         config.extra_allowed_modes.clone(),
         Arc::clone(&shutdown),
     ));
+
+    // Spawn the sleep/wake D-Bus listener thread.  It holds a logind inhibitor
+    // delay lock and disconnects the virtual display before system sleep.
+    spawn_sleep_handler(sleep_strategy, Arc::clone(&shutdown));
 
     run_server(&socket_path, handler, shutdown).map_err(|e| match e {
         ServerError::Bind { path, source } => {
