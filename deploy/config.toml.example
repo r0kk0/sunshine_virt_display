@@ -81,20 +81,12 @@
 #
 # output_ready_timeout_secs = 30
 
-# Seconds before an IPC request is considered timed out.
-# Default: 10
+# Seconds allowed to read or write one IPC frame (range: 1-30).
+# Default: 2
 #
-# ipc_timeout_secs = 10
+# ipc_timeout_secs = 2
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 
-# socket_path = "/run/sunshine-vd/svd.sock"
-# state_path  = "/var/lib/sunshine-vd/state.json"
-
-# ── Advanced ──────────────────────────────────────────────────────────────────
-
-# HDR mode for EDID generation. Disabled by default (causes freezes on many setups).
-# hdr = false
-
-# Allow DRM-master stealing via pidfd_getfd (experimental, black-screen risk).
-# allow_master_stealing = false
+# One of: error, warn, info, debug, trace. RUST_LOG and --verbose override it.
+# log_level = "info"

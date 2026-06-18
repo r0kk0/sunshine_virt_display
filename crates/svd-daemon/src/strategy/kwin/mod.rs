@@ -46,6 +46,7 @@ pub struct KWinStrategy {
     /// Explicit list of connectors to disable on connect (non-exclusive mode).
     /// Empty = don't disable anything unless --exclusive is set.
     disable_outputs: Vec<String>,
+    default_device: Option<String>,
     state: RwLock<Option<ConnectState>>,
 }
 
@@ -54,11 +55,13 @@ impl KWinStrategy {
         state_path: PathBuf,
         output_ready_timeout_secs: u64,
         disable_outputs: Vec<String>,
+        default_device: Option<String>,
     ) -> Self {
         KWinStrategy {
             state_path,
             output_ready_timeout_secs,
             disable_outputs,
+            default_device,
             state: RwLock::new(None),
         }
     }
@@ -78,7 +81,7 @@ impl DisplayStrategy for KWinStrategy {
         let kwin_env = env::KWinEnv::detect()?;
 
         // Step 2: Select DRM card.
-        let card = if let Some(dev) = &params.device {
+        let card = if let Some(dev) = params.device.as_ref().or(self.default_device.as_ref()) {
             dev.clone()
         } else {
             let cards = sysfs::list_drm_cards()?;

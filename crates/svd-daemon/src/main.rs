@@ -7,7 +7,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use clap::Parser;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use svd_daemon::{
-    config::load_config,
+    config::{load_config, Config},
     error::DaemonError,
     handler::RealHandler,
     ipc::{run_server, RequestHandler, ServerError},
@@ -24,17 +24,16 @@ struct Args {
     verbose: bool,
 }
 
-fn run(_args: &Args) -> Result<(), DaemonError> {
-    let config_path = std::path::Path::new("/etc/sunshine-vd/config.toml");
+const CONFIG_PATH: &str = "/etc/sunshine-vd/config.toml";
+const SOCKET_PATH: &str = "/run/sunshine-vd/svd.sock";
+const STATE_PATH: &str = "/var/lib/sunshine-vd/state.json";
 
-    let config = load_config(config_path).map_err(|e| DaemonError::Config(e.to_string()))?;
-
-    let socket_path = std::path::PathBuf::from(&config.socket_path);
-
+fn run(config: &Config) -> Result<(), DaemonError> {
     let strategy = Arc::new(KWinStrategy::new(
-        std::path::PathBuf::from(&config.state_path),
+        std::path::PathBuf::from(STATE_PATH),
         config.output_ready_timeout_secs,
         config.disable_outputs.clone(),
+        config.device.clone(),
     ));
 
     // Attempt to restore state from a previous run (daemon restart).
@@ -63,7 +62,7 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
     // delay lock and disconnects the virtual display before system sleep.
     spawn_sleep_handler(sleep_strategy, Arc::clone(&shutdown));
 
-    run_server(&socket_path, handler, shutdown).map_err(|e| match e {
+    run_server(std::path::Path::new(SOCKET_PATH), handler, shutdown).map_err(|e| match e {
         ServerError::Bind { path, source } => DaemonError::Ipc(format!(
             "failed to bind socket at {}: {}",
             path.display(),
@@ -78,10 +77,22 @@ fn main() {
     // Parse args first so that --help / --version exit 0 before any setup.
     let args = Args::parse();
 
+    let config = match load_config(std::path::Path::new(CONFIG_PATH)) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("svd-daemon: {error}");
+            std::process::exit(1);
+        }
+    };
+
     // Initialise structured tracing to stderr.
     // Priority: RUST_LOG env var > --verbose flag > default "info".
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        let level = if args.verbose { "debug" } else { "info" };
+        let level = if args.verbose {
+            "debug"
+        } else {
+            config.log_level.as_str()
+        };
         tracing_subscriber::EnvFilter::new(level)
     });
 
@@ -92,7 +103,7 @@ fn main() {
 
     tracing::info!("svd-daemon starting");
 
-    if let Err(e) = run(&args) {
+    if let Err(e) = run(&config) {
         tracing::error!(error = %e, "svd-daemon failed");
         std::process::exit(1);
     }
