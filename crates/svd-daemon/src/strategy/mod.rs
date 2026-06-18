@@ -45,6 +45,8 @@ pub enum StrategyError {
     Timeout,
     #[error("not connected (no state file)")]
     NotConnected,
+    #[error("already connected — disconnect first")]
+    AlreadyConnected,
     #[error("{0}")]
     Other(String),
 }

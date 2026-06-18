@@ -59,6 +59,14 @@ impl KWinStrategy {
 
 impl DisplayStrategy for KWinStrategy {
     fn connect(&self, params: &ConnectParams) -> Result<ConnectResult, StrategyError> {
+        // Guard: refuse if already connected to give a clear error instead of NoSlot.
+        {
+            let guard = self.state.read().unwrap();
+            if guard.is_some() {
+                return Err(StrategyError::AlreadyConnected);
+            }
+        }
+
         // Step 1: Detect KWin environment.
         let kwin_env = env::KWinEnv::detect()?;
 
@@ -320,22 +328,69 @@ impl DisplayStrategy for KWinStrategy {
     }
 
     fn restore(&self) -> Result<(), StrategyError> {
-        // Step 1: Try loading ConnectState.
-        match ConnectState::load(&self.state_path)? {
-            Some(cs) => {
-                tracing::info!(
-                    card = %cs.card,
-                    connector = %cs.virtual_port,
-                    "restored existing virtual display state"
-                );
-                // Step 2: Cache in self.state.
-                let mut guard = self.state.write().unwrap();
-                *guard = Some(cs);
+        // Load state file; nothing to do on a clean start.
+        let cs = match ConnectState::load(&self.state_path)? {
+            Some(cs) => cs,
+            None => return Ok(()),
+        };
+
+        // Verify the virtual display is still active in KWin.
+        // If the daemon crashed while connected, KWin may have already removed
+        // the output — the state file is stale and must be cleaned up so
+        // find_empty_slot() can offer the slot again on the next connect().
+        let is_active = match env::KWinEnv::detect() {
+            Ok(kwin_env) => kscreen::list_outputs(&kwin_env)
+                .ok()
+                .map(|raw| {
+                    kscreen::parse_outputs(&raw)
+                        .into_iter()
+                        .any(|o| o.name == cs.virtual_port && o.enabled)
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+
+        if is_active {
+            tracing::info!(
+                card = %cs.card,
+                connector = %cs.virtual_port,
+                "virtual display still active — restoring daemon state"
+            );
+            let mut guard = self.state.write().unwrap();
+            *guard = Some(cs);
+        } else {
+            // Stale state: virtual display no longer enabled in KWin.
+            // Clean up sysfs/EDID so the slot is free for the next connect().
+            tracing::info!(
+                card = %cs.card,
+                connector = %cs.virtual_port,
+                "stale virtual display state detected — cleaning up on startup"
+            );
+
+            // Tell KWin to remove the output (best-effort, KWin may be gone).
+            if let Ok(kwin_env) = env::KWinEnv::detect() {
+                let disable_arg = format!("output.{}.disable", cs.virtual_port);
+                let _ = kscreen::run(&kwin_env, &[disable_arg.as_str()]);
             }
-            None => {
-                // Step 3: Nothing to restore.
+
+            // Reset sysfs status so find_empty_slot() sees the slot as free.
+            if let Err(e) = sysfs::set_connector_status(&cs.card, &cs.virtual_port, false) {
+                tracing::warn!(error = %e, "stale cleanup: failed to set sysfs status to off");
             }
+
+            // Remove the EDID override so the kernel stops reporting the connector.
+            if let Err(e) = sysfs::clear_edid_override(&cs.card, &cs.virtual_port) {
+                tracing::warn!(error = %e, "stale cleanup: failed to clear EDID override");
+            }
+
+            // Delete the state file — next connect() starts fresh.
+            if let Err(e) = ConnectState::delete(&self.state_path) {
+                tracing::warn!(error = %e, "stale cleanup: failed to delete state file");
+            }
+
+            // State cache remains None.
         }
+
         Ok(())
     }
 
