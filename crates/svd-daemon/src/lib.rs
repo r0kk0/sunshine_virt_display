@@ -8,3 +8,4 @@ pub mod error;
 pub mod handler;
 pub mod ipc;
 pub mod strategy;
+pub mod watcher;

@@ -43,13 +43,20 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
         tracing::warn!(error = %e, "restore() failed on startup — starting fresh");
     }
 
-    let handler: Arc<dyn RequestHandler> = Arc::new(RealHandler::new(strategy, config.extra_allowed_modes.clone()));
+    // Create the shutdown flag first so it can be shared with both the signal
+    // handlers and the RealHandler (which propagates it to the crash watcher).
     let shutdown = Arc::new(AtomicBool::new(false));
 
     signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
         .expect("signal registration");
     signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
         .expect("signal registration");
+
+    let handler: Arc<dyn RequestHandler> = Arc::new(RealHandler::new(
+        strategy,
+        config.extra_allowed_modes.clone(),
+        Arc::clone(&shutdown),
+    ));
 
     run_server(&socket_path, handler, shutdown).map_err(|e| match e {
         ServerError::Bind { path, source } => {
