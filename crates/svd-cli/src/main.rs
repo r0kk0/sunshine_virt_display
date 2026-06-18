@@ -11,7 +11,7 @@
 //   - Transport uses svd_proto::framing (newline-delimited JSON, max 4096 bytes).
 
 use clap::{Parser, Subcommand};
-use svd_proto::{validate_request, Request, Response};
+use svd_proto::{validate_request_format, Request, Response};
 
 const SOCKET_PATH: &str = "/run/sunshine-vd/svd.sock";
 
@@ -150,8 +150,10 @@ fn main() {
     let json = args.json;
     let req = build_request(args.command);
 
-    // Validate before any IPC send.
-    if let Err(e) = validate_request(&req, &[]) {
+    // Validate numeric bounds and device format locally.
+    // Mode allowlist is NOT checked here — the daemon validates it against
+    // its loaded config (which may include extra_allowed_modes).
+    if let Err(e) = validate_request_format(&req) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }

@@ -1,0 +1,62 @@
+# sunshine-vd daemon configuration
+# Copy to /etc/sunshine-vd/config.toml and edit as needed.
+# All fields are optional — omitting them uses the safe defaults shown below.
+
+# ── Display output management ─────────────────────────────────────────────────
+
+# Connectors to disable when a virtual display is connected.
+# Use `kscreen-doctor -o` to list connector names on your system.
+#
+# Scenarios:
+#   (unset)                          add virtual display, leave all monitors on
+#   disable_outputs = ["DP-1"]       disable primary only, keep secondary active
+#   disable_outputs = ["DP-1","DP-2"] disable all physical monitors (headless)
+#
+# Note: `svd connect --exclusive` overrides this and disables ALL active outputs.
+#
+# disable_outputs = []
+
+# Override DRM card auto-detection. Useful on multi-GPU systems.
+# Default: the card with the most connected outputs is selected.
+#
+# device = "card1"
+
+# ── Allowed display modes ─────────────────────────────────────────────────────
+
+# Built-in VIC table includes: 720p@30/60, 1080p@30/60/120, 1440p@60/120, 4K@30/60.
+# Add custom resolutions here — required for modes outside the VIC table.
+#
+# [[extra_allowed_modes]]
+# width = 2560
+# height = 1440
+# refresh = 165
+#
+# [[extra_allowed_modes]]
+# width = 3840
+# height = 2160
+# refresh = 120
+
+# ── Timing ────────────────────────────────────────────────────────────────────
+
+# Seconds to wait for KWin to assign the virtual connector after sysfs enable.
+# Default: 30
+#
+# output_ready_timeout_secs = 30
+
+# Seconds before an IPC request is considered timed out.
+# Default: 10
+#
+# ipc_timeout_secs = 10
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+
+# socket_path = "/run/sunshine-vd/svd.sock"
+# state_path  = "/var/lib/sunshine-vd/state.json"
+
+# ── Advanced ──────────────────────────────────────────────────────────────────
+
+# HDR mode for EDID generation. Disabled by default (causes freezes on many setups).
+# hdr = false
+
+# Allow DRM-master stealing via pidfd_getfd (experimental, black-screen risk).
+# allow_master_stealing = false

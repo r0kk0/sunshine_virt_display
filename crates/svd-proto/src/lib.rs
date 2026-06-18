@@ -139,6 +139,38 @@ fn is_valid_device(s: &str) -> bool {
     }
 }
 
+/// Validate a [`Request`] checking only numeric bounds and device format.
+///
+/// This is the validation the CLI performs locally before sending to the
+/// daemon. It intentionally skips the mode allowlist so that modes added via
+/// `extra_allowed_modes` in the daemon config are not rejected client-side.
+/// The daemon performs full validation via [`validate_request`].
+pub fn validate_request_format(req: &Request) -> Result<(), &'static str> {
+    match req {
+        Request::Connect { width, height, refresh, device, .. } => {
+            if *width < 1 || *width > 16384 {
+                return Err("out_of_range");
+            }
+            if *height < 1 || *height > 16384 {
+                return Err("out_of_range");
+            }
+            if *refresh < 24 || *refresh > 480 {
+                return Err("out_of_range");
+            }
+            if let Some(dev) = device {
+                if has_disallowed_chars(dev) {
+                    return Err("invalid_input");
+                }
+                if !is_valid_device(dev) {
+                    return Err("invalid_device");
+                }
+            }
+            Ok(())
+        }
+        Request::Disconnect {} | Request::Status {} | Request::Restore {} => Ok(()),
+    }
+}
+
 /// Validate a [`Request`].  Returns `Err` with an IPC error-code string on
 /// failure.
 ///
