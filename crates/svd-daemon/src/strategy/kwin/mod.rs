@@ -27,7 +27,7 @@ fn read_uid(pid: u32) -> Result<u32, StrategyError> {
             let first = rest
                 .split_whitespace()
                 .next()
-                .ok_or_else(|| StrategyError::CompositorNotFound)?;
+                .ok_or(StrategyError::CompositorNotFound)?;
             return first
                 .parse::<u32>()
                 .map_err(|_| StrategyError::CompositorNotFound);
