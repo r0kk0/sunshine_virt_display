@@ -1,4 +1,5 @@
 // Shared types for sunshine-virt-display.
+pub mod framing;
 // T2.1 — IPC Request/Response types + mode allowlist + input validation.
 //
 // Security requirements:

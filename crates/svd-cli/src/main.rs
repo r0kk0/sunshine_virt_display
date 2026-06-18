@@ -1,4 +1,4 @@
-// T2.2 — CLI clap subcommands → proto::Request
+// T4.9 — CLI transport: send request to daemon over Unix socket
 //
 // Design notes:
 //   - clap is responsible only for type-parsing and required-ness.
@@ -6,12 +6,14 @@
 //     is delegated to svd_proto::validate_request, which is the sole gate
 //     that exits 1.  This keeps clap's exit code (2 for usage errors) distinct
 //     from a validation failure (1), enabling callers to distinguish the two.
-//   - The `--json` global flag is present for forward-compat (T3.2), where it
-//     will select JSON-formatted response output.  In the stub it is inert
-//     because we always print the request JSON.
+//   - The `--json` global flag selects machine-readable JSON response output.
+//   - `--dry-run` on Connect skips socket I/O and prints "Dry run OK".
+//   - Transport uses svd_proto::framing (newline-delimited JSON, max 4096 bytes).
 
 use clap::{Parser, Subcommand};
-use svd_proto::{validate_request, Request};
+use svd_proto::{validate_request, Request, Response};
+
+const SOCKET_PATH: &str = "/run/sunshine-vd/svd.sock";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CLI types
@@ -83,24 +85,123 @@ fn build_request(cmd: Commands) -> Request {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Human-readable response printer
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Print a human-readable representation of `resp` to stdout/stderr.
+/// Returns true if the response indicates success (for exit code determination).
+fn print_human(resp: &Response) -> bool {
+    match resp {
+        Response::Connect { ok: true, connector, mode, .. } => {
+            let c = connector.as_deref().unwrap_or("?");
+            let m = mode.as_deref().unwrap_or("?");
+            println!("virtual display connected: {c} {m}");
+            true
+        }
+        Response::Connect { ok: false, error, .. } => {
+            let e = error.as_deref().unwrap_or("unknown error");
+            eprintln!("error: {e}");
+            false
+        }
+        Response::Disconnect { ok: true, .. } => {
+            println!("virtual display disconnected");
+            true
+        }
+        Response::Disconnect { ok: false, error, .. } => {
+            let e = error.as_deref().unwrap_or("unknown error");
+            eprintln!("error: {e}");
+            false
+        }
+        Response::Status { connected: true, card, connector, mode, .. } => {
+            println!("connected: yes");
+            println!("  card:      {}", card.as_deref().unwrap_or("?"));
+            println!("  connector: {}", connector.as_deref().unwrap_or("?"));
+            println!("  mode:      {}", mode.as_deref().unwrap_or("?"));
+            true
+        }
+        Response::Status { connected: false, .. } => {
+            println!("connected: no");
+            true
+        }
+        Response::Restore { ok: true, .. } => {
+            println!("restore ok");
+            true
+        }
+        Response::Restore { ok: false, error, .. } => {
+            let e = error.as_deref().unwrap_or("unknown error");
+            eprintln!("error: {e}");
+            false
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn main() {
     let args = Args::parse();
-    // `--json` is accepted now for forward-compat; T3.2 will use it to select
-    // JSON-formatted response output instead of human-readable text.
-    let _json = args.json;
+    let json = args.json;
     let req = build_request(args.command);
 
-    // Validate before any (future) IPC send.
+    // Validate before any IPC send.
     if let Err(e) = validate_request(&req, &[]) {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 
-    // Stub transport: print the request as JSON and exit 0.
-    // In T3.2 this will be replaced by a real IPC send, and `--json` will
-    // toggle whether the *response* is rendered as JSON or human-readable text.
-    println!("{}", serde_json::to_string_pretty(&req).unwrap());
+    // Dry-run: skip socket I/O and exit successfully.
+    if let Request::Connect { dry_run: true, .. } = &req {
+        println!("Dry run OK");
+        std::process::exit(0);
+    }
+
+    // Open the Unix socket to the daemon.
+    let mut stream = match std::os::unix::net::UnixStream::connect(SOCKET_PATH) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: daemon not running ({e})");
+            std::process::exit(1);
+        }
+    };
+
+    // Send the request as a newline-delimited JSON frame.
+    if let Err(e) = svd_proto::framing::write_frame(&mut stream, &req) {
+        eprintln!("error: failed to send request ({e})");
+        std::process::exit(1);
+    }
+
+    // Read the response frame.
+    let frame = match svd_proto::framing::read_frame(&mut stream) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: failed to read response ({e})");
+            std::process::exit(1);
+        }
+    };
+
+    // Deserialize the response.
+    let resp: Response = match serde_json::from_str(&frame) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: invalid response from daemon ({e})");
+            std::process::exit(1);
+        }
+    };
+
+    // Output and exit.
+    if json {
+        println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        // Derive exit code from the ok/connected field.
+        let ok = match &resp {
+            Response::Connect { ok, .. } => *ok,
+            Response::Disconnect { ok, .. } => *ok,
+            Response::Status { .. } => true,
+            Response::Restore { ok, .. } => *ok,
+        };
+        std::process::exit(if ok { 0 } else { 1 });
+    } else {
+        let ok = print_human(&resp);
+        std::process::exit(if ok { 0 } else { 1 });
+    }
 }
