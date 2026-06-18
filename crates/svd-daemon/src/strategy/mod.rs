@@ -11,6 +11,9 @@ pub struct ConnectParams {
     /// If true, disable all currently-active physical monitors before
     /// connecting the virtual display (remote headless streaming mode).
     pub exclusive: bool,
+    /// Authenticated IPC identity. `None` is reserved for internal recovery.
+    pub requester_uid: Option<u32>,
+    pub requester_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

@@ -136,17 +136,11 @@ impl Config {
 }
 
 fn valid_card(value: &str) -> bool {
-    value
-        .strip_prefix("card")
-        .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    svd_proto::CardId::try_from(value).is_ok()
 }
 
 fn valid_connector(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    svd_proto::ConnectorId::try_from(value).is_ok()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

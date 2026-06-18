@@ -55,9 +55,7 @@ pub fn list_drm_cards() -> Result<Vec<String>, StrategyError> {
 }
 
 fn is_drm_card_name(name: &str) -> bool {
-    name.starts_with("card")
-        && name[4..].chars().all(|c| c.is_ascii_digit())
-        && !name[4..].is_empty()
+    svd_proto::CardId::try_from(name).is_ok()
 }
 
 /// Return connector names with status `"connected"` for a card.

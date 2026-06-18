@@ -86,6 +86,135 @@ pub struct Mode {
     pub refresh: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CardId(String);
+
+impl CardId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for CardId {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let suffix = value.strip_prefix("card").ok_or("invalid_device")?;
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("invalid_device");
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for CardId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl From<CardId> for String {
+    fn from(value: CardId) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for CardId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ConnectorId(String);
+
+impl ConnectorId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for ConnectorId {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("invalid_connector");
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for ConnectorId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl From<ConnectorId> for String {
+    fn from(value: ConnectorId) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for ConnectorId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod identifier_tests {
+    use super::{CardId, ConnectorId};
+
+    #[test]
+    fn card_id_accepts_kernel_card_names() {
+        assert_eq!(
+            CardId::try_from("card12").expect("valid").as_str(),
+            "card12"
+        );
+    }
+
+    #[test]
+    fn card_id_rejects_path_and_empty_suffix() {
+        assert!(CardId::try_from("card").is_err());
+        assert!(CardId::try_from("../card0").is_err());
+    }
+
+    #[test]
+    fn connector_id_accepts_common_drm_names() {
+        for name in ["DP-1", "HDMI-A-2", "eDP-1", "Virtual_1"] {
+            assert_eq!(ConnectorId::try_from(name).expect("valid").as_str(), name);
+        }
+    }
+
+    #[test]
+    fn connector_id_rejects_command_and_path_syntax() {
+        for name in ["", "DP-1.disable", "../DP-1", "DP/1", "DP-1\n"] {
+            assert!(ConnectorId::try_from(name).is_err(), "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn identifiers_validate_during_deserialization() {
+        assert!(serde_json::from_str::<CardId>("\"card0\"").is_ok());
+        assert!(serde_json::from_str::<CardId>("\"../card0\"").is_err());
+        assert!(serde_json::from_str::<ConnectorId>("\"DP-1\"").is_ok());
+        assert!(serde_json::from_str::<ConnectorId>("\"DP-1.disable\"").is_err());
+    }
+}
+
 impl Mode {
     const fn new(width: u32, height: u32, refresh: u32) -> Self {
         Self {
@@ -135,10 +264,7 @@ fn has_disallowed_chars(s: &str) -> bool {
 
 /// Checks that a device name matches `^card[0-9]+$`.
 fn is_valid_device(s: &str) -> bool {
-    match s.strip_prefix("card") {
-        Some(rest) => !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()),
-        None => false,
-    }
+    CardId::try_from(s).is_ok()
 }
 
 /// Validate a [`Request`] checking only numeric bounds and device format.

@@ -14,7 +14,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::ipc::server::{RequestContext, RequestHandler};
-use crate::strategy::kwin::KWinStrategy;
 use crate::strategy::{ConnectParams, DisplayStrategy};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -23,7 +22,7 @@ use crate::strategy::{ConnectParams, DisplayStrategy};
 
 /// Bridges the IPC layer to the KWin display strategy.
 ///
-/// Wraps a shared `KWinStrategy` instance and translates each
+/// Wraps a shared display strategy and translates each
 /// [`svd_proto::Request`] into the corresponding strategy call, mapping
 /// results to [`svd_proto::Response`] variants.
 ///
@@ -35,7 +34,7 @@ use crate::strategy::{ConnectParams, DisplayStrategy};
 /// `sunshine-watcher` background thread (T5) so the virtual display is
 /// automatically torn down if Sunshine crashes.
 pub struct RealHandler {
-    strategy: Arc<KWinStrategy>,
+    strategy: Arc<dyn DisplayStrategy>,
     extra_allowed_modes: Vec<svd_proto::Mode>,
     /// Propagated to the crash-watcher so it stops cleanly when the daemon
     /// receives SIGTERM / SIGINT.
@@ -43,9 +42,9 @@ pub struct RealHandler {
 }
 
 impl RealHandler {
-    /// Construct a new `RealHandler` backed by the given `KWinStrategy`.
+    /// Construct a new `RealHandler` backed by the given display strategy.
     pub fn new(
-        strategy: Arc<KWinStrategy>,
+        strategy: Arc<dyn DisplayStrategy>,
         extra_allowed_modes: Vec<svd_proto::Mode>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
@@ -58,7 +57,7 @@ impl RealHandler {
 }
 
 impl RequestHandler for RealHandler {
-    fn handle(&self, _context: RequestContext, req: svd_proto::Request) -> svd_proto::Response {
+    fn handle(&self, context: RequestContext, req: svd_proto::Request) -> svd_proto::Response {
         use svd_proto::{Request, Response};
 
         // Server-side validation — rejects out-of-range or non-allowlisted modes
@@ -119,15 +118,16 @@ impl RequestHandler for RealHandler {
                     refresh,
                     device,
                     exclusive,
+                    requester_uid: Some(context.peer.uid),
+                    requester_pid: Some(context.peer.pid),
                 };
                 match self.strategy.connect(&params) {
                     Ok(result) => {
                         // T5: Spawn crash watcher after a successful connect so that
                         // the virtual display is automatically disconnected if Sunshine
-                        // exits unexpectedly.  Cast to the trait object so `watcher`
-                        // does not depend on KWinStrategy directly (DIP).
+                        // exits unexpectedly.
                         crate::watcher::spawn_watcher(
-                            Arc::clone(&self.strategy) as Arc<dyn crate::strategy::DisplayStrategy>,
+                            Arc::clone(&self.strategy),
                             Arc::clone(&self.shutdown),
                         );
 

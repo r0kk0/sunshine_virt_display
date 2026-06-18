@@ -1,4 +1,5 @@
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
 
@@ -112,6 +113,10 @@ fn parse_geometry(s: &str) -> Option<(i32, i32, u32, u32)> {
 /// expected in the daemon's environment at this call site.
 fn run_with_binary(binary: &str, env: &KWinEnv, args: &[&str]) -> Result<String, StrategyError> {
     let output = Command::new(binary)
+        .uid(env.uid)
+        .gid(env.gid)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
         .env("WAYLAND_DISPLAY", &env.wayland_display)
         .env("XDG_RUNTIME_DIR", &env.xdg_runtime_dir)
         .args(args)
@@ -151,7 +156,7 @@ fn run_with_binary(binary: &str, env: &KWinEnv, args: &[&str]) -> Result<String,
 /// Returns `StrategyError::KscreenDoctor` if kscreen-doctor is not found in
 /// PATH, exits non-zero, or is killed by a signal.
 pub fn run(env: &KWinEnv, args: &[&str]) -> Result<String, StrategyError> {
-    run_with_binary("kscreen-doctor", env, args)
+    run_with_binary("/usr/bin/kscreen-doctor", env, args)
 }
 
 /// Run `kscreen-doctor -o` and return the trimmed stdout string.
@@ -178,8 +183,12 @@ mod tests {
     use super::*;
 
     fn fake_env() -> KWinEnv {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata("/proc/self").expect("process metadata");
         KWinEnv {
             pid: 0,
+            uid: metadata.uid(),
+            gid: metadata.gid(),
             wayland_display: "wayland-1".into(),
             xdg_runtime_dir: "/run/user/1000".into(),
         }

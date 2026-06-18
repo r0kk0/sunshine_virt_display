@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::strategy::StrategyError;
 
@@ -31,6 +32,8 @@ fn read_socket_from_cmdline(pid: u32) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct KWinEnv {
     pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
     pub wayland_display: String,
     pub xdg_runtime_dir: String,
 }
@@ -44,6 +47,10 @@ impl KWinEnv {
     /// Returns [`StrategyError::Io`] on top-level `/proc` read failure or on
     /// failure to read the matched process's `environ` file.
     pub fn detect() -> Result<Self, StrategyError> {
+        Self::detect_for_uid(None)
+    }
+
+    pub fn detect_for_uid(requester_uid: Option<u32>) -> Result<Self, StrategyError> {
         // A top-level failure to enumerate /proc is a real I/O error.
         let entries = fs::read_dir("/proc").map_err(StrategyError::Io)?;
 
@@ -78,6 +85,32 @@ impl KWinEnv {
                 continue;
             }
 
+            let executable = match fs::canonicalize(format!("/proc/{pid}/exe")) {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
+            let executable_metadata = match fs::metadata(&executable) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if !executable_metadata.is_file()
+                || executable_metadata.uid() != 0
+                || executable_metadata.permissions().mode() & 0o111 == 0
+            {
+                continue;
+            }
+
+            let status = match fs::read_to_string(format!("/proc/{pid}/status")) {
+                Ok(status) => status,
+                Err(_) => continue,
+            };
+            let Some((uid, gid)) = parse_process_ids(&status) else {
+                continue;
+            };
+            if requester_uid.is_some_and(|requester| requester != 0 && requester != uid) {
+                continue;
+            }
+
             let environ_path = format!("/proc/{}/environ", pid);
             let raw = match fs::read(&environ_path) {
                 Ok(b) => b,
@@ -88,7 +121,7 @@ impl KWinEnv {
 
             let xdg_runtime_dir = vars.get("XDG_RUNTIME_DIR").cloned().unwrap_or_default();
 
-            if xdg_runtime_dir.is_empty() {
+            if xdg_runtime_dir != format!("/run/user/{uid}") {
                 continue;
             }
 
@@ -103,9 +136,18 @@ impl KWinEnv {
                     read_socket_from_cmdline(pid).unwrap_or_else(|| "wayland-0".into())
                 }
             };
+            if wayland_display.is_empty()
+                || wayland_display.len() > 108
+                || wayland_display.contains('/')
+                || wayland_display.chars().any(char::is_control)
+            {
+                continue;
+            }
 
             return Ok(KWinEnv {
                 pid,
+                uid,
+                gid,
                 wayland_display,
                 xdg_runtime_dir,
             });
@@ -113,6 +155,19 @@ impl KWinEnv {
 
         Err(StrategyError::CompositorNotFound)
     }
+}
+
+pub(crate) fn parse_process_ids(status: &str) -> Option<(u32, u32)> {
+    let mut uid = None;
+    let mut gid = None;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("Uid:") {
+            uid = value.split_whitespace().next()?.parse().ok();
+        } else if let Some(value) = line.strip_prefix("Gid:") {
+            gid = value.split_whitespace().next()?.parse().ok();
+        }
+    }
+    Some((uid?, gid?))
 }
 
 /// Parse a NUL-separated `KEY=VALUE` byte blob (as found in `/proc/$pid/environ`)
@@ -174,5 +229,17 @@ mod tests {
     fn parse_environ_empty_input() {
         let vars = parse_environ(b"");
         assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn parse_process_ids_reads_real_uid_and_gid() {
+        let status =
+            "Name:\tkwin_wayland\nUid:\t1000\t1000\t1000\t1000\nGid:\t1001\t1001\t1001\t1001\n";
+        assert_eq!(parse_process_ids(status), Some((1000, 1001)));
+    }
+
+    #[test]
+    fn parse_process_ids_rejects_missing_fields() {
+        assert_eq!(parse_process_ids("Uid:\t1000\t1000\n"), None);
     }
 }

@@ -78,7 +78,7 @@ impl DisplayStrategy for KWinStrategy {
         }
 
         // Step 1: Detect KWin environment.
-        let kwin_env = env::KWinEnv::detect()?;
+        let kwin_env = env::KWinEnv::detect_for_uid(params.requester_uid)?;
 
         // Step 2: Select DRM card.
         let card = if let Some(dev) = params.device.as_ref().or(self.default_device.as_ref()) {
