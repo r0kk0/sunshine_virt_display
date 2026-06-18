@@ -40,7 +40,7 @@ pub fn generate(width: u32, height: u32, refresh_hz: u32) -> Vec<u8> {
     edid[15] = ((serial >> 24) & 0xFF) as u8;
 
     // Week / year of manufacture
-    edid[16] = 1;  // Week 1
+    edid[16] = 1; // Week 1
     edid[17] = 33; // 1990 + 33 = 2023
 
     // ── EDID version 1.4 (bytes 18–19) ───────────────────────────────────────
@@ -117,7 +117,7 @@ pub fn generate(width: u32, height: u32, refresh_hz: u32) -> Vec<u8> {
 
     // Sync offsets and widths
     let h_sync_offset: u32 = (h_blank * 2) / 10; // int(h_blank * 0.2)
-    let h_sync_width: u32 = (h_blank * 4) / 10;  // int(h_blank * 0.4)
+    let h_sync_width: u32 = (h_blank * 4) / 10; // int(h_blank * 0.4)
     let v_sync_offset: u32 = 2;
     let v_sync_width: u32 = 6;
 
@@ -136,8 +136,8 @@ pub fn generate(width: u32, height: u32, refresh_hz: u32) -> Vec<u8> {
     edid[67] = (v_size_mm & 0xFF) as u8;
     edid[68] = (((h_size_mm >> 8) << 4) | (v_size_mm >> 8)) as u8;
 
-    edid[69] = 0;    // H border
-    edid[70] = 0;    // V border
+    edid[69] = 0; // H border
+    edid[70] = 0; // V border
     edid[71] = 0x18; // Non-interlaced, digital separate sync
 
     // ── Display product name descriptor (bytes 72–89) ────────────────────────
@@ -162,9 +162,9 @@ pub fn generate(width: u32, height: u32, refresh_hz: u32) -> Vec<u8> {
     edid[94] = 0x00;
     edid[95] = min_v_rate.min(255) as u8;
     edid[96] = max_v_rate.min(255) as u8;
-    edid[97] = 30;   // Min H rate (kHz)
-    edid[98] = 160;  // Max H rate (kHz)
-    edid[99] = 220;  // Max pixel clock / 10 MHz → 2200 MHz
+    edid[97] = 30; // Min H rate (kHz)
+    edid[98] = 160; // Max H rate (kHz)
+    edid[99] = 220; // Max pixel clock / 10 MHz → 2200 MHz
     edid[100] = 0x00;
     edid[101] = 0x0A;
     edid[102] = 0x20;
@@ -239,14 +239,21 @@ mod tests {
     #[test]
     fn edid_header_is_valid() {
         let edid = generate(1920, 1080, 60);
-        assert_eq!(&edid[0..8], &[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+        assert_eq!(
+            &edid[0..8],
+            &[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
+        );
     }
 
     #[test]
     fn edid_checksum_is_valid() {
         let edid = generate(1920, 1080, 60);
         let sum: u32 = edid.iter().map(|b| *b as u32).sum();
-        assert_eq!(sum % 256, 0, "EDID checksum should make the whole block sum to 0 mod 256");
+        assert_eq!(
+            sum % 256,
+            0,
+            "EDID checksum should make the whole block sum to 0 mod 256"
+        );
     }
 
     #[test]

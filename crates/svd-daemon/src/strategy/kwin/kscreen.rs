@@ -2,8 +2,8 @@ use std::io;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::strategy::StrategyError;
 use crate::strategy::kwin::env::KWinEnv;
+use crate::strategy::StrategyError;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // OutputInfo — layout snapshot
@@ -236,7 +236,8 @@ mod tests {
 
     #[test]
     fn parse_outputs_disabled_output_has_enabled_false() {
-        let text = "Output: 4 DP-1 uuid\n    disabled\n    connected\n    Geometry: 0,0 1920x1080\n";
+        let text =
+            "Output: 4 DP-1 uuid\n    disabled\n    connected\n    Geometry: 0,0 1920x1080\n";
         let outputs = parse_outputs(text);
         assert_eq!(outputs.len(), 1);
         assert!(!outputs[0].enabled);

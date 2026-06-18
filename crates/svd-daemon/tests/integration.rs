@@ -9,8 +9,8 @@ use std::{
     os::unix::net::UnixStream,
     path::PathBuf,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     thread,
     time::{Duration, Instant},
@@ -21,7 +21,11 @@ use svd_daemon::ipc::{read_frame, run_server, write_frame, StubHandler};
 /// Build a unique temp socket path for this test.
 fn temp_socket_path(test_name: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("svd_itest_{}_{}.sock", test_name, std::process::id()));
+    p.push(format!(
+        "svd_itest_{}_{}.sock",
+        test_name,
+        std::process::id()
+    ));
     p
 }
 
@@ -63,11 +67,9 @@ fn status_round_trip() {
     );
 
     // Connect and send a Status request.
-    let mut stream = UnixStream::connect(&socket_path)
-        .expect("failed to connect to server socket");
+    let mut stream = UnixStream::connect(&socket_path).expect("failed to connect to server socket");
 
-    write_frame(&mut stream, &svd_proto::Request::Status {})
-        .expect("write_frame(Status) failed");
+    write_frame(&mut stream, &svd_proto::Request::Status {}).expect("write_frame(Status) failed");
 
     // Read the response.
     let resp_frame = read_frame(&mut stream).expect("read_frame failed");
@@ -78,7 +80,10 @@ fn status_round_trip() {
     match resp {
         svd_proto::Response::Status { ok, connected, .. } => {
             assert!(ok, "StubHandler should return ok=true for Status");
-            assert!(!connected, "StubHandler should return connected=false for Status");
+            assert!(
+                !connected,
+                "StubHandler should return connected=false for Status"
+            );
         }
         other => panic!("unexpected response variant: {other:?}"),
     }

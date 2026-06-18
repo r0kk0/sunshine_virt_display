@@ -156,7 +156,11 @@ mod tests {
         fn new(name: &str, content: &str) -> Self {
             let mut path = std::env::temp_dir();
             // Include the test name AND a nonce to avoid parallel-test collisions.
-            path.push(format!("svd_config_test_{}_{}.toml", name, std::process::id()));
+            path.push(format!(
+                "svd_config_test_{}_{}.toml",
+                name,
+                std::process::id()
+            ));
             let mut f = std::fs::File::create(&path).expect("create temp file");
             f.write_all(content.as_bytes()).expect("write temp file");
             TempFile { path }
@@ -177,15 +181,16 @@ mod tests {
 
     #[test]
     fn missing_file_returns_safe_defaults() {
-        let path = std::path::Path::new(
-            "/tmp/svd_config_this_file_must_not_exist_abc123xyz.toml",
-        );
+        let path = std::path::Path::new("/tmp/svd_config_this_file_must_not_exist_abc123xyz.toml");
         // Guarantee it really does not exist.
         let _ = std::fs::remove_file(path);
 
         let cfg = load_config(path).expect("missing file should yield defaults");
         assert!(!cfg.hdr, "hdr must default to false");
-        assert!(!cfg.allow_master_stealing, "allow_master_stealing must default to false");
+        assert!(
+            !cfg.allow_master_stealing,
+            "allow_master_stealing must default to false"
+        );
     }
 
     // ── 2. Empty file → safe defaults ───────────────────────────────────────
@@ -280,7 +285,11 @@ refresh = 120
     #[test]
     fn extra_allowed_modes_widen_vic_allowlist() {
         // 1024×768@75 is NOT in the built-in VIC table.
-        let non_vic = svd_proto::Mode { width: 1024, height: 768, refresh: 75 };
+        let non_vic = svd_proto::Mode {
+            width: 1024,
+            height: 768,
+            refresh: 75,
+        };
         assert!(
             !is_mode_allowed(&non_vic, &[]),
             "1024x768@75 should not be in the built-in VIC table"

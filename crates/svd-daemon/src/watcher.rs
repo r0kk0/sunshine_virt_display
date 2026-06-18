@@ -11,8 +11,8 @@
 //!     on `KWinStrategy` directly.
 
 use std::os::unix::io::RawFd;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::strategy::DisplayStrategy;
 

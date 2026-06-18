@@ -2,10 +2,7 @@
 //!
 //! Parses CLI arguments, loads config, starts the IPC server.
 
-use std::sync::{
-    Arc,
-    atomic::AtomicBool,
-};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use clap::Parser;
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -15,7 +12,7 @@ use svd_daemon::{
     handler::RealHandler,
     ipc::{run_server, RequestHandler, ServerError},
     sleep::spawn_sleep_handler,
-    strategy::{DisplayStrategy, kwin::KWinStrategy},
+    strategy::{kwin::KWinStrategy, DisplayStrategy},
 };
 
 /// Sunshine Virtual Display daemon (privileged)
@@ -49,10 +46,8 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
     // handlers and the RealHandler (which propagates it to the crash watcher).
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
-        .expect("signal registration");
-    signal_hook::flag::register(SIGINT, Arc::clone(&shutdown))
-        .expect("signal registration");
+    signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown)).expect("signal registration");
+    signal_hook::flag::register(SIGINT, Arc::clone(&shutdown)).expect("signal registration");
 
     // Clone the strategy Arc before it is moved into RealHandler so that the
     // sleep handler can share the same strategy instance.
@@ -69,9 +64,11 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
     spawn_sleep_handler(sleep_strategy, Arc::clone(&shutdown));
 
     run_server(&socket_path, handler, shutdown).map_err(|e| match e {
-        ServerError::Bind { path, source } => {
-            DaemonError::Ipc(format!("failed to bind socket at {}: {}", path.display(), source))
-        }
+        ServerError::Bind { path, source } => DaemonError::Ipc(format!(
+            "failed to bind socket at {}: {}",
+            path.display(),
+            source
+        )),
         ServerError::Io(e) => DaemonError::Io(e),
         ServerError::Framing(e) => DaemonError::Ipc(e.to_string()),
     })
@@ -83,11 +80,10 @@ fn main() {
 
     // Initialise structured tracing to stderr.
     // Priority: RUST_LOG env var > --verbose flag > default "info".
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            let level = if args.verbose { "debug" } else { "info" };
-            tracing_subscriber::EnvFilter::new(level)
-        });
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let level = if args.verbose { "debug" } else { "info" };
+        tracing_subscriber::EnvFilter::new(level)
+    });
 
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)

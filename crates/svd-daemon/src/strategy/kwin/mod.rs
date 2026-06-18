@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+use crate::strategy::kwin::state::ConnectState;
 use crate::strategy::{
     ConnectParams, ConnectResult, DisplayStrategy, StrategyError, StrategyStatus,
 };
-use crate::strategy::kwin::state::ConnectState;
 
 // ---------------------------------------------------------------------------
 // Local helper: read the real uid of a process from /proc/$pid/status
@@ -24,10 +24,13 @@ fn read_uid(pid: u32) -> Result<u32, StrategyError> {
     for line in contents.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
             // Format: "Uid:\tREAL EFFECTIVE SAVED FILESYSTEM"
-            let first = rest.split_whitespace().next().ok_or_else(|| {
-                StrategyError::CompositorNotFound
-            })?;
-            return first.parse::<u32>().map_err(|_| StrategyError::CompositorNotFound);
+            let first = rest
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| StrategyError::CompositorNotFound)?;
+            return first
+                .parse::<u32>()
+                .map_err(|_| StrategyError::CompositorNotFound);
         }
     }
     Err(StrategyError::CompositorNotFound)
@@ -47,7 +50,11 @@ pub struct KWinStrategy {
 }
 
 impl KWinStrategy {
-    pub fn new(state_path: PathBuf, output_ready_timeout_secs: u64, disable_outputs: Vec<String>) -> Self {
+    pub fn new(
+        state_path: PathBuf,
+        output_ready_timeout_secs: u64,
+        disable_outputs: Vec<String>,
+    ) -> Self {
         KWinStrategy {
             state_path,
             output_ready_timeout_secs,

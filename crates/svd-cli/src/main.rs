@@ -81,9 +81,21 @@ enum Commands {
 
 fn build_request(cmd: Commands) -> Request {
     match cmd {
-        Commands::Connect { width, height, refresh, device, dry_run, exclusive } => {
-            Request::Connect { width, height, refresh, device, dry_run, exclusive }
-        }
+        Commands::Connect {
+            width,
+            height,
+            refresh,
+            device,
+            dry_run,
+            exclusive,
+        } => Request::Connect {
+            width,
+            height,
+            refresh,
+            device,
+            dry_run,
+            exclusive,
+        },
         Commands::Disconnect => Request::Disconnect {},
         Commands::Status => Request::Status {},
         Commands::Restore => Request::Restore {},
@@ -98,13 +110,20 @@ fn build_request(cmd: Commands) -> Request {
 /// Returns true if the response indicates success (for exit code determination).
 fn print_human(resp: &Response) -> bool {
     match resp {
-        Response::Connect { ok: true, connector, mode, .. } => {
+        Response::Connect {
+            ok: true,
+            connector,
+            mode,
+            ..
+        } => {
             let c = connector.as_deref().unwrap_or("?");
             let m = mode.as_deref().unwrap_or("?");
             println!("virtual display connected: {c} {m}");
             true
         }
-        Response::Connect { ok: false, error, .. } => {
+        Response::Connect {
+            ok: false, error, ..
+        } => {
             let e = error.as_deref().unwrap_or("unknown error");
             eprintln!("error: {e}");
             false
@@ -113,19 +132,29 @@ fn print_human(resp: &Response) -> bool {
             println!("virtual display disconnected");
             true
         }
-        Response::Disconnect { ok: false, error, .. } => {
+        Response::Disconnect {
+            ok: false, error, ..
+        } => {
             let e = error.as_deref().unwrap_or("unknown error");
             eprintln!("error: {e}");
             false
         }
-        Response::Status { connected: true, card, connector, mode, .. } => {
+        Response::Status {
+            connected: true,
+            card,
+            connector,
+            mode,
+            ..
+        } => {
             println!("connected: yes");
             println!("  card:      {}", card.as_deref().unwrap_or("?"));
             println!("  connector: {}", connector.as_deref().unwrap_or("?"));
             println!("  mode:      {}", mode.as_deref().unwrap_or("?"));
             true
         }
-        Response::Status { connected: false, .. } => {
+        Response::Status {
+            connected: false, ..
+        } => {
             println!("connected: no");
             true
         }
@@ -133,7 +162,9 @@ fn print_human(resp: &Response) -> bool {
             println!("restore ok");
             true
         }
-        Response::Restore { ok: false, error, .. } => {
+        Response::Restore {
+            ok: false, error, ..
+        } => {
             let e = error.as_deref().unwrap_or("unknown error");
             eprintln!("error: {e}");
             false

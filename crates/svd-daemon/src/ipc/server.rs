@@ -16,8 +16,8 @@ use std::{
     os::unix::net::UnixListener,
     path::Path,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
 };
 
@@ -77,7 +77,10 @@ impl RequestHandler for StubHandler {
                 mode: None,
                 strategy: None,
             },
-            _ => Response::Disconnect { ok: true, error: None },
+            _ => Response::Disconnect {
+                ok: true,
+                error: None,
+            },
         }
     }
 }

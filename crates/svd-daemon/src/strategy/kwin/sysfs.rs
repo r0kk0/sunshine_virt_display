@@ -69,7 +69,9 @@ pub fn connected_connectors(card: &str) -> Result<Vec<String>, StrategyError> {
     for entry in std::fs::read_dir("/sys/class/drm")? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(connector) = name.strip_prefix(&prefix) else { continue };
+        let Some(connector) = name.strip_prefix(&prefix) else {
+            continue;
+        };
         let status_path = entry.path().join("status");
         match std::fs::read_to_string(&status_path) {
             Ok(s) if s.trim() == "connected" => result.push(connector.to_owned()),
@@ -97,7 +99,9 @@ pub fn find_empty_slot(card: &str) -> Result<String, StrategyError> {
     for entry in std::fs::read_dir("/sys/class/drm")? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(connector) = name.strip_prefix(&prefix) else { continue };
+        let Some(connector) = name.strip_prefix(&prefix) else {
+            continue;
+        };
         let status_path = entry.path().join("status");
         let status = match std::fs::read_to_string(&status_path) {
             Ok(s) => s,
@@ -161,7 +165,9 @@ pub fn clear_kwin_output_config(port: &str, uid: u32) -> Result<(), StrategyErro
         Some(h) => h,
         None => return Ok(()),
     };
-    let config_path = Path::new(&home).join(".config").join("kwinoutputconfig.json");
+    let config_path = Path::new(&home)
+        .join(".config")
+        .join("kwinoutputconfig.json");
     let contents = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -277,19 +283,13 @@ mod tests {
     #[test]
     fn sysfs_connector_status_path() {
         let path = connector_status_path("card1", "DP-2");
-        assert_eq!(
-            path,
-            PathBuf::from("/sys/class/drm/card1-DP-2/status")
-        );
+        assert_eq!(path, PathBuf::from("/sys/class/drm/card1-DP-2/status"));
     }
 
     #[test]
     fn sysfs_connector_status_path_hdmi() {
         let path = connector_status_path("card0", "HDMI-A-1");
-        assert_eq!(
-            path,
-            PathBuf::from("/sys/class/drm/card0-HDMI-A-1/status")
-        );
+        assert_eq!(path, PathBuf::from("/sys/class/drm/card0-HDMI-A-1/status"));
     }
 
     // --- DRM card name detection ---
@@ -303,9 +303,9 @@ mod tests {
 
     #[test]
     fn is_drm_card_name_rejects_invalid() {
-        assert!(!is_drm_card_name("card"));       // no digits
+        assert!(!is_drm_card_name("card")); // no digits
         assert!(!is_drm_card_name("renderD128")); // wrong prefix
-        assert!(!is_drm_card_name("card0abc"));   // non-digit suffix
+        assert!(!is_drm_card_name("card0abc")); // non-digit suffix
         assert!(!is_drm_card_name("controlD64")); // wrong prefix
     }
 
@@ -330,7 +330,8 @@ mod tests {
 
     #[test]
     fn filter_kwin_output_config_object_removes_matching_entry() {
-        let json = r#"{"outputs":[{"name":"DP-3","scale":1.0},{"name":"DP-1","scale":2.0}],"version":2}"#;
+        let json =
+            r#"{"outputs":[{"name":"DP-3","scale":1.0},{"name":"DP-1","scale":2.0}],"version":2}"#;
         let result = filter_kwin_output_config(json, "DP-3").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let outputs = parsed["outputs"].as_array().unwrap();

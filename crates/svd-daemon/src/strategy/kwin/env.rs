@@ -86,10 +86,7 @@ impl KWinEnv {
 
             let vars = parse_environ(&raw);
 
-            let xdg_runtime_dir = vars
-                .get("XDG_RUNTIME_DIR")
-                .cloned()
-                .unwrap_or_default();
+            let xdg_runtime_dir = vars.get("XDG_RUNTIME_DIR").cloned().unwrap_or_default();
 
             if xdg_runtime_dir.is_empty() {
                 continue;
@@ -99,10 +96,7 @@ impl KWinEnv {
             // the socket name is passed via --socket <name> on the command line.
             // Fall back to reading cmdline, then to the conventional default.
             let wayland_display = {
-                let from_env = vars
-                    .get("WAYLAND_DISPLAY")
-                    .cloned()
-                    .unwrap_or_default();
+                let from_env = vars.get("WAYLAND_DISPLAY").cloned().unwrap_or_default();
                 if !from_env.is_empty() {
                     from_env
                 } else {
@@ -149,8 +143,14 @@ mod tests {
     fn parse_environ_bytes_extracts_vars() {
         let raw = b"HOME=/root\0WAYLAND_DISPLAY=wayland-1\0XDG_RUNTIME_DIR=/run/user/1000\0";
         let vars = parse_environ(raw);
-        assert_eq!(vars.get("WAYLAND_DISPLAY").map(String::as_str), Some("wayland-1"));
-        assert_eq!(vars.get("XDG_RUNTIME_DIR").map(String::as_str), Some("/run/user/1000"));
+        assert_eq!(
+            vars.get("WAYLAND_DISPLAY").map(String::as_str),
+            Some("wayland-1")
+        );
+        assert_eq!(
+            vars.get("XDG_RUNTIME_DIR").map(String::as_str),
+            Some("/run/user/1000")
+        );
         assert_eq!(vars.get("HOME").map(String::as_str), Some("/root"));
     }
 

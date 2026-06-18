@@ -14,8 +14,8 @@
 //!     releasing are separate operations with explicit ownership semantics.
 
 use std::os::fd::OwnedFd;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::OwnedFd as ZOwnedFd;
@@ -40,10 +40,7 @@ use crate::strategy::DisplayStrategy;
 /// The thread is intentionally non-joinable — the daemon's main thread owns
 /// the shutdown flag and will exit the process when it fires, which drops all
 /// threads naturally.
-pub fn spawn_sleep_handler(
-    strategy: Arc<dyn DisplayStrategy>,
-    shutdown: Arc<AtomicBool>,
-) {
+pub fn spawn_sleep_handler(strategy: Arc<dyn DisplayStrategy>, shutdown: Arc<AtomicBool>) {
     std::thread::Builder::new()
         .name("sleep-handler".into())
         .spawn(move || run_sleep_loop(strategy, shutdown))
@@ -76,12 +73,7 @@ fn run_sleep_loop(strategy: Arc<dyn DisplayStrategy>, shutdown: Arc<AtomicBool>)
     }
 
     // ── Build the logind manager proxy ────────────────────────────────────
-    let proxy = match Proxy::new(
-        &conn,
-        LOGIND_DEST,
-        LOGIND_PATH,
-        LOGIND_IFACE,
-    ) {
+    let proxy = match Proxy::new(&conn, LOGIND_DEST, LOGIND_PATH, LOGIND_IFACE) {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "sleep-handler: failed to build logind proxy");
@@ -205,7 +197,9 @@ fn run_sleep_loop(strategy: Arc<dyn DisplayStrategy>, shutdown: Arc<AtomicBool>)
             }
 
             Ok(Event::Shutdown(true)) => {
-                tracing::info!("sleep-handler: PrepareForShutdown(true) — disconnecting before shutdown");
+                tracing::info!(
+                    "sleep-handler: PrepareForShutdown(true) — disconnecting before shutdown"
+                );
                 if strategy.status().connected {
                     if let Err(e) = strategy.disconnect() {
                         tracing::error!(error = %e, "sleep-handler: disconnect before shutdown failed");
