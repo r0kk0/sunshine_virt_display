@@ -12,7 +12,9 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use svd_daemon::{
     config::load_config,
     error::DaemonError,
-    ipc::{run_server, ServerError, StubHandler},
+    handler::RealHandler,
+    ipc::{run_server, RequestHandler, ServerError},
+    strategy::{DisplayStrategy, kwin::KWinStrategy},
 };
 
 /// Sunshine Virtual Display daemon (privileged)
@@ -31,7 +33,17 @@ fn run(_args: &Args) -> Result<(), DaemonError> {
 
     let socket_path = std::path::PathBuf::from(&config.socket_path);
 
-    let handler = Arc::new(StubHandler);
+    let strategy = Arc::new(KWinStrategy::new(
+        std::path::PathBuf::from(&config.state_path),
+        config.output_ready_timeout_secs,
+    ));
+
+    // Attempt to restore state from a previous run (daemon restart).
+    if let Err(e) = strategy.restore() {
+        tracing::warn!(error = %e, "restore() failed on startup — starting fresh");
+    }
+
+    let handler: Arc<dyn RequestHandler> = Arc::new(RealHandler::new(strategy));
     let shutdown = Arc::new(AtomicBool::new(false));
 
     signal_hook::flag::register(SIGTERM, Arc::clone(&shutdown))
