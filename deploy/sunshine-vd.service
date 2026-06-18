@@ -1,0 +1,18 @@
+[Unit]
+Description=Sunshine Virtual Display Daemon
+After=display-manager.service dbus.service
+Requires=dbus.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/svd-daemon
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+# Required: write access to /sys/kernel/debug/dri (EDID override) and /sys/class/drm
+AmbientCapabilities=CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target
