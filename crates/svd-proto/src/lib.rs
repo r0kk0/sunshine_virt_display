@@ -62,6 +62,7 @@ pub enum Response {
     },
     Status {
         ok: bool,
+        phase: LifecyclePhase,
         connected: bool,
         card: Option<String>,
         connector: Option<String>,
@@ -72,6 +73,16 @@ pub enum Response {
         ok: bool,
         error: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecyclePhase {
+    Disconnected,
+    Connecting,
+    Connected,
+    Disconnecting,
+    RecoveryRequired,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -86,9 +97,142 @@ pub struct Mode {
     pub refresh: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CardId(String);
+
+impl CardId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for CardId {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let suffix = value.strip_prefix("card").ok_or("invalid_device")?;
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("invalid_device");
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for CardId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl From<CardId> for String {
+    fn from(value: CardId) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for CardId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ConnectorId(String);
+
+impl ConnectorId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for ConnectorId {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("invalid_connector");
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for ConnectorId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+
+impl From<ConnectorId> for String {
+    fn from(value: ConnectorId) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for ConnectorId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod identifier_tests {
+    use super::{CardId, ConnectorId};
+
+    #[test]
+    fn card_id_accepts_kernel_card_names() {
+        assert_eq!(
+            CardId::try_from("card12").expect("valid").as_str(),
+            "card12"
+        );
+    }
+
+    #[test]
+    fn card_id_rejects_path_and_empty_suffix() {
+        assert!(CardId::try_from("card").is_err());
+        assert!(CardId::try_from("../card0").is_err());
+    }
+
+    #[test]
+    fn connector_id_accepts_common_drm_names() {
+        for name in ["DP-1", "HDMI-A-2", "eDP-1", "Virtual_1"] {
+            assert_eq!(ConnectorId::try_from(name).expect("valid").as_str(), name);
+        }
+    }
+
+    #[test]
+    fn connector_id_rejects_command_and_path_syntax() {
+        for name in ["", "DP-1.disable", "../DP-1", "DP/1", "DP-1\n"] {
+            assert!(ConnectorId::try_from(name).is_err(), "accepted {name:?}");
+        }
+    }
+
+    #[test]
+    fn identifiers_validate_during_deserialization() {
+        assert!(serde_json::from_str::<CardId>("\"card0\"").is_ok());
+        assert!(serde_json::from_str::<CardId>("\"../card0\"").is_err());
+        assert!(serde_json::from_str::<ConnectorId>("\"DP-1\"").is_ok());
+        assert!(serde_json::from_str::<ConnectorId>("\"DP-1.disable\"").is_err());
+    }
+}
+
 impl Mode {
     const fn new(width: u32, height: u32, refresh: u32) -> Self {
-        Self { width, height, refresh }
+        Self {
+            width,
+            height,
+            refresh,
+        }
     }
 }
 
@@ -126,17 +270,12 @@ pub fn is_mode_allowed(mode: &Mode, extra_allowed: &[Mode]) -> bool {
 /// Returns `true` when `s` contains a path-traversal sequence, NUL byte, or
 /// any control character.
 fn has_disallowed_chars(s: &str) -> bool {
-    s.contains('/')
-        || s.contains("..")
-        || s.chars().any(|c| c.is_control())
+    s.contains('/') || s.contains("..") || s.chars().any(|c| c.is_control())
 }
 
 /// Checks that a device name matches `^card[0-9]+$`.
 fn is_valid_device(s: &str) -> bool {
-    match s.strip_prefix("card") {
-        Some(rest) => !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()),
-        None => false,
-    }
+    CardId::try_from(s).is_ok()
 }
 
 /// Validate a [`Request`] checking only numeric bounds and device format.
@@ -147,7 +286,13 @@ fn is_valid_device(s: &str) -> bool {
 /// The daemon performs full validation via [`validate_request`].
 pub fn validate_request_format(req: &Request) -> Result<(), &'static str> {
     match req {
-        Request::Connect { width, height, refresh, device, .. } => {
+        Request::Connect {
+            width,
+            height,
+            refresh,
+            device,
+            ..
+        } => {
             if *width < 1 || *width > 16384 {
                 return Err("out_of_range");
             }
@@ -186,7 +331,13 @@ pub fn validate_request_format(req: &Request) -> Result<(), &'static str> {
 /// 4. **invalid_device** — device must match `^card[0-9]+$`.
 pub fn validate_request(req: &Request, extra_allowed: &[Mode]) -> Result<(), &'static str> {
     match req {
-        Request::Connect { width, height, refresh, device, .. } => {
+        Request::Connect {
+            width,
+            height,
+            refresh,
+            device,
+            ..
+        } => {
             // 1. Numeric sanity bounds (pre-filter).
             if *width < 1 || *width > 16384 {
                 return Err("out_of_range");
@@ -199,7 +350,11 @@ pub fn validate_request(req: &Request, extra_allowed: &[Mode]) -> Result<(), &'s
             }
 
             // 2. Mode allowlist.
-            let mode = Mode { width: *width, height: *height, refresh: *refresh };
+            let mode = Mode {
+                width: *width,
+                height: *height,
+                refresh: *refresh,
+            };
             if !is_mode_allowed(&mode, extra_allowed) {
                 return Err("mode_not_allowed");
             }
@@ -235,7 +390,14 @@ mod tests {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     fn connect(width: u32, height: u32, refresh: u32) -> Request {
-        Request::Connect { width, height, refresh, device: None, dry_run: false, exclusive: false }
+        Request::Connect {
+            width,
+            height,
+            refresh,
+            device: None,
+            dry_run: false,
+            exclusive: false,
+        }
     }
 
     fn connect_dev(width: u32, height: u32, refresh: u32, dev: &str) -> Request {
@@ -257,7 +419,14 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&json).unwrap();
         match back {
-            Request::Connect { width, height, refresh, device, dry_run, .. } => {
+            Request::Connect {
+                width,
+                height,
+                refresh,
+                device,
+                dry_run,
+                ..
+            } => {
                 assert_eq!((width, height, refresh), (1920, 1080, 60));
                 assert_eq!(device, None);
                 assert!(!dry_run);
@@ -279,7 +448,14 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&json).unwrap();
         match back {
-            Request::Connect { width, height, refresh, device, dry_run, exclusive } => {
+            Request::Connect {
+                width,
+                height,
+                refresh,
+                device,
+                dry_run,
+                exclusive,
+            } => {
                 assert_eq!((width, height, refresh), (1280, 720, 60));
                 assert_eq!(device.as_deref(), Some("card0"));
                 assert!(dry_run);
@@ -324,7 +500,10 @@ mod tests {
         // deny_unknown_fields constraint.
         let json = r#"{"cmd":"connect","width":1280,"height":720,"refresh":60,"evil":1}"#;
         let result: Result<Request, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "expected error for unknown field 'evil', got Ok");
+        assert!(
+            result.is_err(),
+            "expected error for unknown field 'evil', got Ok"
+        );
     }
 
     #[test]
@@ -334,21 +513,30 @@ mod tests {
         // internally-tagged enum path and would silently accept extra keys.
         let json = r#"{"cmd":"disconnect","evil":true}"#;
         let result: Result<Request, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "expected error for unknown field in Disconnect");
+        assert!(
+            result.is_err(),
+            "expected error for unknown field in Disconnect"
+        );
     }
 
     #[test]
     fn unknown_field_in_status_is_rejected() {
         let json = r#"{"cmd":"status","evil":true}"#;
         let result: Result<Request, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "expected error for unknown field in Status");
+        assert!(
+            result.is_err(),
+            "expected error for unknown field in Status"
+        );
     }
 
     #[test]
     fn unknown_field_in_restore_is_rejected() {
         let json = r#"{"cmd":"restore","evil":true}"#;
         let result: Result<Request, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "expected error for unknown field in Restore");
+        assert!(
+            result.is_err(),
+            "expected error for unknown field in Restore"
+        );
     }
 
     // ── 3. Mode on VIC allowlist → Ok(()) ────────────────────────────────────
@@ -386,7 +574,11 @@ mod tests {
 
     #[test]
     fn extra_allowed_mode_accepted() {
-        let extra = vec![Mode { width: 1024, height: 768, refresh: 75 }];
+        let extra = vec![Mode {
+            width: 1024,
+            height: 768,
+            refresh: 75,
+        }];
         assert_eq!(validate_request(&connect(1024, 768, 75), &extra), Ok(()));
     }
 
@@ -430,7 +622,10 @@ mod tests {
     fn width_zero_is_out_of_range() {
         // width=0 is below the sanity bound; must return out_of_range, not
         // mode_not_allowed (numeric pre-filter runs before allowlist check).
-        assert_eq!(validate_request(&connect(0, 1080, 60), &[]), Err("out_of_range"));
+        assert_eq!(
+            validate_request(&connect(0, 1080, 60), &[]),
+            Err("out_of_range")
+        );
     }
 
     // ── 10. refresh=999 → Err("out_of_range") ────────────────────────────────
@@ -438,7 +633,10 @@ mod tests {
     #[test]
     fn refresh_999_is_out_of_range() {
         // refresh=999 is above the sanity bound; same ordering rule applies.
-        assert_eq!(validate_request(&connect(1920, 1080, 999), &[]), Err("out_of_range"));
+        assert_eq!(
+            validate_request(&connect(1920, 1080, 999), &[]),
+            Err("out_of_range")
+        );
     }
 
     // ── edge cases ────────────────────────────────────────────────────────────
@@ -472,23 +670,35 @@ mod tests {
 
     #[test]
     fn height_zero_is_out_of_range() {
-        assert_eq!(validate_request(&connect(1920, 0, 60), &[]), Err("out_of_range"));
+        assert_eq!(
+            validate_request(&connect(1920, 0, 60), &[]),
+            Err("out_of_range")
+        );
     }
 
     #[test]
     fn refresh_below_minimum_is_out_of_range() {
         // 23 is below the minimum of 24.
-        assert_eq!(validate_request(&connect(1920, 1080, 23), &[]), Err("out_of_range"));
+        assert_eq!(
+            validate_request(&connect(1920, 1080, 23), &[]),
+            Err("out_of_range")
+        );
     }
 
     #[test]
     fn width_above_max_is_out_of_range() {
-        assert_eq!(validate_request(&connect(16385, 1080, 60), &[]), Err("out_of_range"));
+        assert_eq!(
+            validate_request(&connect(16385, 1080, 60), &[]),
+            Err("out_of_range")
+        );
     }
 
     #[test]
     fn height_above_max_is_out_of_range() {
-        assert_eq!(validate_request(&connect(1920, 16385, 60), &[]), Err("out_of_range"));
+        assert_eq!(
+            validate_request(&connect(1920, 16385, 60), &[]),
+            Err("out_of_range")
+        );
     }
 
     #[test]

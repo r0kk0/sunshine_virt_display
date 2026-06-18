@@ -11,6 +11,9 @@ pub struct ConnectParams {
     /// If true, disable all currently-active physical monitors before
     /// connecting the virtual display (remote headless streaming mode).
     pub exclusive: bool,
+    /// Authenticated IPC identity. `None` is reserved for internal recovery.
+    pub requester_uid: Option<u32>,
+    pub requester_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +25,7 @@ pub struct ConnectResult {
 
 #[derive(Debug, Clone)]
 pub struct StrategyStatus {
+    pub phase: svd_proto::LifecyclePhase,
     pub connected: bool,
     pub card: Option<String>,
     pub connector: Option<String>,
@@ -47,6 +51,8 @@ pub enum StrategyError {
     NotConnected,
     #[error("already connected — disconnect first")]
     AlreadyConnected,
+    #[error("requester is not authorized for the active display session")]
+    Unauthorized,
     #[error("{0}")]
     Other(String),
 }
@@ -56,4 +62,5 @@ pub trait DisplayStrategy: Send + Sync {
     fn disconnect(&self) -> Result<(), StrategyError>;
     fn restore(&self) -> Result<(), StrategyError>;
     fn status(&self) -> StrategyStatus;
+    fn is_authorized(&self, uid: u32) -> bool;
 }

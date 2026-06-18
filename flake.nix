@@ -13,7 +13,10 @@
         in {
           default = pkgs.mkShell {
             packages = [
-              (pkgs.python3.withPackages (ps: [ ps.pytest ps.pytest-cov ps.jeepney ]))
+              pkgs.cargo
+              pkgs.clippy
+              pkgs.rustc
+              pkgs.rustfmt
             ];
           };
         }

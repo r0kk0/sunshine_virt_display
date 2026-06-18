@@ -2,7 +2,12 @@
 //!
 //! All functions use `std::fs` — no subprocess, no shell.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::OpenOptions,
+    io::{Read, Seek, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Path, PathBuf},
+};
 
 use crate::strategy::StrategyError;
 
@@ -55,9 +60,7 @@ pub fn list_drm_cards() -> Result<Vec<String>, StrategyError> {
 }
 
 fn is_drm_card_name(name: &str) -> bool {
-    name.starts_with("card")
-        && name[4..].chars().all(|c| c.is_ascii_digit())
-        && !name[4..].is_empty()
+    svd_proto::CardId::try_from(name).is_ok()
 }
 
 /// Return connector names with status `"connected"` for a card.
@@ -69,7 +72,9 @@ pub fn connected_connectors(card: &str) -> Result<Vec<String>, StrategyError> {
     for entry in std::fs::read_dir("/sys/class/drm")? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(connector) = name.strip_prefix(&prefix) else { continue };
+        let Some(connector) = name.strip_prefix(&prefix) else {
+            continue;
+        };
         let status_path = entry.path().join("status");
         match std::fs::read_to_string(&status_path) {
             Ok(s) if s.trim() == "connected" => result.push(connector.to_owned()),
@@ -97,7 +102,9 @@ pub fn find_empty_slot(card: &str) -> Result<String, StrategyError> {
     for entry in std::fs::read_dir("/sys/class/drm")? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(connector) = name.strip_prefix(&prefix) else { continue };
+        let Some(connector) = name.strip_prefix(&prefix) else {
+            continue;
+        };
         let status_path = entry.path().join("status");
         let status = match std::fs::read_to_string(&status_path) {
             Ok(s) => s,
@@ -161,21 +168,45 @@ pub fn clear_kwin_output_config(port: &str, uid: u32) -> Result<(), StrategyErro
         Some(h) => h,
         None => return Ok(()),
     };
-    let config_path = Path::new(&home).join(".config").join("kwinoutputconfig.json");
-    let contents = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(StrategyError::Io(e)),
-    };
-    if let Some(rewritten) = filter_kwin_output_config(&contents, port) {
-        std::fs::write(&config_path, rewritten)?;
-    }
-    Ok(())
+    let config_path = Path::new(&home)
+        .join(".config")
+        .join("kwinoutputconfig.json");
+    rewrite_kwin_config_file(&config_path, port, uid)
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn rewrite_kwin_config_file(path: &Path, port: &str, uid: u32) -> Result<(), StrategyError> {
+    let mut file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(StrategyError::Io(error)),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != uid {
+        return Err(StrategyError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "KWin config must be a regular file owned by the session user",
+        )));
+    }
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    if let Some(rewritten) = filter_kwin_output_config(&contents, port) {
+        file.rewind()?;
+        file.set_len(0)?;
+        file.write_all(rewritten.as_bytes())?;
+        file.sync_all()?;
+    }
+    Ok(())
+}
 
 /// Parse `/etc/passwd` to find the home directory for `uid`.
 /// Line format: `name:password:uid:gid:gecos:home:shell`
@@ -277,19 +308,13 @@ mod tests {
     #[test]
     fn sysfs_connector_status_path() {
         let path = connector_status_path("card1", "DP-2");
-        assert_eq!(
-            path,
-            PathBuf::from("/sys/class/drm/card1-DP-2/status")
-        );
+        assert_eq!(path, PathBuf::from("/sys/class/drm/card1-DP-2/status"));
     }
 
     #[test]
     fn sysfs_connector_status_path_hdmi() {
         let path = connector_status_path("card0", "HDMI-A-1");
-        assert_eq!(
-            path,
-            PathBuf::from("/sys/class/drm/card0-HDMI-A-1/status")
-        );
+        assert_eq!(path, PathBuf::from("/sys/class/drm/card0-HDMI-A-1/status"));
     }
 
     // --- DRM card name detection ---
@@ -303,9 +328,9 @@ mod tests {
 
     #[test]
     fn is_drm_card_name_rejects_invalid() {
-        assert!(!is_drm_card_name("card"));       // no digits
+        assert!(!is_drm_card_name("card")); // no digits
         assert!(!is_drm_card_name("renderD128")); // wrong prefix
-        assert!(!is_drm_card_name("card0abc"));   // non-digit suffix
+        assert!(!is_drm_card_name("card0abc")); // non-digit suffix
         assert!(!is_drm_card_name("controlD64")); // wrong prefix
     }
 
@@ -330,7 +355,8 @@ mod tests {
 
     #[test]
     fn filter_kwin_output_config_object_removes_matching_entry() {
-        let json = r#"{"outputs":[{"name":"DP-3","scale":1.0},{"name":"DP-1","scale":2.0}],"version":2}"#;
+        let json =
+            r#"{"outputs":[{"name":"DP-3","scale":1.0},{"name":"DP-1","scale":2.0}],"version":2}"#;
         let result = filter_kwin_output_config(json, "DP-3").unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let outputs = parsed["outputs"].as_array().unwrap();
@@ -381,5 +407,26 @@ mod tests {
         // uid u32::MAX should never exist in /etc/passwd
         let home = find_home_for_uid(u32::MAX);
         assert!(home.is_none());
+    }
+
+    #[test]
+    fn kwin_config_rewrite_rejects_symlink_targets() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+
+        let directory = std::env::temp_dir().join(format!("svd_kwin_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("target.json");
+        let link = directory.join("kwinoutputconfig.json");
+        std::fs::write(&target, r#"[{"name":"DP-1"}]"#).unwrap();
+        symlink(&target, &link).unwrap();
+        let uid = std::fs::metadata("/proc/self").unwrap().uid();
+
+        assert!(rewrite_kwin_config_file(&link, "DP-1", uid).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            r#"[{"name":"DP-1"}]"#
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

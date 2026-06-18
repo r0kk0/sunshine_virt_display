@@ -30,6 +30,12 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Run tests
         run: cargo test --workspace
 
@@ -38,3 +44,8 @@ jobs:
           cargo run --bin svd-daemon -- --help
           cargo run --bin svd-restore -- --help
           cargo run --bin svd -- --help
+
+      - name: Audit dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

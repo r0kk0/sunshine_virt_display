@@ -30,8 +30,7 @@ mod tests {
         let mut cursor = Cursor::new(buf);
         let frame = read_frame(&mut cursor).expect("read_frame failed");
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&frame).expect("frame not valid JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&frame).expect("frame not valid JSON");
         assert_eq!(parsed, value);
     }
 
@@ -75,7 +74,10 @@ mod tests {
 
         let mut cursor = Cursor::new(wire);
         let result = read_frame(&mut cursor);
-        assert!(result.is_ok(), "expected Ok for {content_len}-byte content frame");
+        assert!(
+            result.is_ok(),
+            "expected Ok for {content_len}-byte content frame"
+        );
         assert_eq!(result.unwrap().len(), content_len);
     }
 

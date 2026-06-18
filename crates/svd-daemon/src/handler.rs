@@ -10,12 +10,11 @@
 //!     concrete implementation (KWinStrategy is injected at construction time
 //!     via Arc).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
-use crate::ipc::server::RequestHandler;
+use crate::ipc::server::{RequestContext, RequestHandler};
 use crate::strategy::{ConnectParams, DisplayStrategy};
-use crate::strategy::kwin::KWinStrategy;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // RealHandler
@@ -23,38 +22,44 @@ use crate::strategy::kwin::KWinStrategy;
 
 /// Bridges the IPC layer to the KWin display strategy.
 ///
-/// Wraps a shared `KWinStrategy` instance and translates each
+/// Wraps a shared display strategy and translates each
 /// [`svd_proto::Request`] into the corresponding strategy call, mapping
 /// results to [`svd_proto::Response`] variants.
 ///
 /// Validates requests server-side against the configured mode allowlist before
-/// dispatching to the strategy (defense-in-depth: the CLI validates too, but
-/// the daemon socket is world-readable so any process can write to it).
+/// dispatching to the strategy. Kernel socket permissions and peer credentials
+/// provide authorization; validation remains a separate defense-in-depth gate.
 ///
 /// On a successful `Connect` request the handler spawns the
 /// `sunshine-watcher` background thread (T5) so the virtual display is
 /// automatically torn down if Sunshine crashes.
 pub struct RealHandler {
-    strategy: Arc<KWinStrategy>,
+    strategy: Arc<dyn DisplayStrategy>,
     extra_allowed_modes: Vec<svd_proto::Mode>,
     /// Propagated to the crash-watcher so it stops cleanly when the daemon
     /// receives SIGTERM / SIGINT.
     shutdown: Arc<AtomicBool>,
+    watcher_generation: Arc<AtomicU64>,
 }
 
 impl RealHandler {
-    /// Construct a new `RealHandler` backed by the given `KWinStrategy`.
+    /// Construct a new `RealHandler` backed by the given display strategy.
     pub fn new(
-        strategy: Arc<KWinStrategy>,
+        strategy: Arc<dyn DisplayStrategy>,
         extra_allowed_modes: Vec<svd_proto::Mode>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
-        RealHandler { strategy, extra_allowed_modes, shutdown }
+        RealHandler {
+            strategy,
+            extra_allowed_modes,
+            shutdown,
+            watcher_generation: Arc::new(AtomicU64::new(0)),
+        }
     }
 }
 
 impl RequestHandler for RealHandler {
-    fn handle(&self, req: svd_proto::Request) -> svd_proto::Response {
+    fn handle(&self, context: RequestContext, req: svd_proto::Request) -> svd_proto::Response {
         use svd_proto::{Request, Response};
 
         // Server-side validation — rejects out-of-range or non-allowlisted modes
@@ -62,21 +67,60 @@ impl RequestHandler for RealHandler {
         if let Err(e) = svd_proto::validate_request(&req, &self.extra_allowed_modes) {
             return match &req {
                 Request::Connect { .. } => Response::Connect {
-                    ok: false, connector: None, card: None, mode: None,
-                    error: Some(e.to_string()), message: None,
+                    ok: false,
+                    connector: None,
+                    card: None,
+                    mode: None,
+                    error: Some(e.to_string()),
+                    message: None,
                 },
-                Request::Disconnect {} => Response::Disconnect { ok: false, error: Some(e.to_string()) },
+                Request::Disconnect {} => Response::Disconnect {
+                    ok: false,
+                    error: Some(e.to_string()),
+                },
                 Request::Status {} => Response::Status {
-                    ok: false, connected: false, card: None, connector: None,
-                    mode: None, strategy: None,
+                    ok: false,
+                    phase: svd_proto::LifecyclePhase::Disconnected,
+                    connected: false,
+                    card: None,
+                    connector: None,
+                    mode: None,
+                    strategy: None,
                 },
-                Request::Restore {} => Response::Restore { ok: false, error: Some(e.to_string()) },
+                Request::Restore {} => Response::Restore {
+                    ok: false,
+                    error: Some(e.to_string()),
+                },
+            };
+        }
+
+        if matches!(req, Request::Disconnect {} | Request::Restore {})
+            && !self.strategy.is_authorized(context.peer.uid)
+        {
+            let error = crate::strategy::StrategyError::Unauthorized.to_string();
+            return match req {
+                Request::Disconnect {} => Response::Disconnect {
+                    ok: false,
+                    error: Some(error),
+                },
+                Request::Restore {} => Response::Restore {
+                    ok: false,
+                    error: Some(error),
+                },
+                _ => unreachable!(),
             };
         }
 
         match req {
             // ── Connect ────────────────────────────────────────────────────────
-            Request::Connect { width, height, refresh, device, dry_run, exclusive } => {
+            Request::Connect {
+                width,
+                height,
+                refresh,
+                device,
+                dry_run,
+                exclusive,
+            } => {
                 if dry_run {
                     return Response::Connect {
                         ok: true,
@@ -88,17 +132,31 @@ impl RequestHandler for RealHandler {
                     };
                 }
 
-                let params = ConnectParams { width, height, refresh, device, exclusive };
+                let params = ConnectParams {
+                    width,
+                    height,
+                    refresh,
+                    device,
+                    exclusive,
+                    requester_uid: Some(context.peer.uid),
+                    requester_pid: Some(context.peer.pid),
+                };
                 match self.strategy.connect(&params) {
                     Ok(result) => {
                         // T5: Spawn crash watcher after a successful connect so that
                         // the virtual display is automatically disconnected if Sunshine
-                        // exits unexpectedly.  Cast to the trait object so `watcher`
-                        // does not depend on KWinStrategy directly (DIP).
-                        crate::watcher::spawn_watcher(
-                            Arc::clone(&self.strategy) as Arc<dyn crate::strategy::DisplayStrategy>,
+                        // exits unexpectedly.
+                        let token = self.watcher_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                        if let Err(error) = crate::watcher::spawn_watcher(
+                            Arc::clone(&self.strategy),
                             Arc::clone(&self.shutdown),
-                        );
+                            Arc::clone(&self.watcher_generation),
+                            token,
+                            context.peer.pid,
+                            context.peer.uid,
+                        ) {
+                            tracing::warn!(%error, "could not spawn Sunshine watcher");
+                        }
 
                         Response::Connect {
                             ok: true,
@@ -121,16 +179,26 @@ impl RequestHandler for RealHandler {
             }
 
             // ── Disconnect ─────────────────────────────────────────────────────
-            Request::Disconnect {} => match self.strategy.disconnect() {
-                Ok(()) => Response::Disconnect { ok: true, error: None },
-                Err(e) => Response::Disconnect { ok: false, error: Some(e.to_string()) },
-            },
+            Request::Disconnect {} => {
+                self.watcher_generation.fetch_add(1, Ordering::AcqRel);
+                match self.strategy.disconnect() {
+                    Ok(()) => Response::Disconnect {
+                        ok: true,
+                        error: None,
+                    },
+                    Err(e) => Response::Disconnect {
+                        ok: false,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
 
             // ── Status ─────────────────────────────────────────────────────────
             Request::Status {} => {
                 let s = self.strategy.status();
                 Response::Status {
                     ok: true,
+                    phase: s.phase,
                     connected: s.connected,
                     card: s.card,
                     connector: s.connector,
@@ -140,10 +208,19 @@ impl RequestHandler for RealHandler {
             }
 
             // ── Restore ────────────────────────────────────────────────────────
-            Request::Restore {} => match self.strategy.restore() {
-                Ok(()) => Response::Restore { ok: true, error: None },
-                Err(e) => Response::Restore { ok: false, error: Some(e.to_string()) },
-            },
+            Request::Restore {} => {
+                self.watcher_generation.fetch_add(1, Ordering::AcqRel);
+                match self.strategy.restore() {
+                    Ok(()) => Response::Restore {
+                        ok: true,
+                        error: None,
+                    },
+                    Err(e) => Response::Restore {
+                        ok: false,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
         }
     }
 }
