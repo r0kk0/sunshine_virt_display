@@ -20,6 +20,7 @@ UMask=0007
 
 # DRM/debugfs writes plus dropping kscreen-doctor to the desktop UID/GID.
 CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SETUID
 NoNewPrivileges=yes
 ProtectSystem=full
 PrivateTmp=yes
