@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::strategy::kwin::env::KWinEnv;
 use crate::strategy::StrategyError;
+use svd_proto::ConnectorId;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // OutputInfo — layout snapshot
@@ -47,6 +48,7 @@ pub struct OutputInfo {
 /// kscreen-doctor format changes don't break the daemon.
 pub fn parse_outputs(text: &str) -> Vec<OutputInfo> {
     let mut result: Vec<OutputInfo> = Vec::new();
+    let mut current_output = None;
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -54,7 +56,8 @@ pub fn parse_outputs(text: &str) -> Vec<OutputInfo> {
         if let Some(rest) = trimmed.strip_prefix("Output:") {
             // "Output: N NAME uuid" — start a new output block.
             let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() >= 2 {
+            current_output = None;
+            if parts.len() >= 2 && ConnectorId::try_from(parts[1]).is_ok() {
                 result.push(OutputInfo {
                     name: parts[1].to_string(),
                     enabled: false,
@@ -63,22 +66,23 @@ pub fn parse_outputs(text: &str) -> Vec<OutputInfo> {
                     width: 0,
                     height: 0,
                 });
+                current_output = Some(result.len() - 1);
             }
         } else if trimmed == "enabled" {
-            if let Some(last) = result.last_mut() {
-                last.enabled = true;
+            if let Some(output) = current_output.and_then(|index| result.get_mut(index)) {
+                output.enabled = true;
             }
         } else if trimmed == "disabled" {
-            if let Some(last) = result.last_mut() {
-                last.enabled = false;
+            if let Some(output) = current_output.and_then(|index| result.get_mut(index)) {
+                output.enabled = false;
             }
         } else if let Some(rest) = trimmed.strip_prefix("Geometry:") {
-            if let Some(last) = result.last_mut() {
+            if let Some(output) = current_output.and_then(|index| result.get_mut(index)) {
                 if let Some((x, y, w, h)) = parse_geometry(rest.trim()) {
-                    last.x = x;
-                    last.y = y;
-                    last.width = w;
-                    last.height = h;
+                    output.x = x;
+                    output.y = y;
+                    output.width = w;
+                    output.height = h;
                 }
             }
         }
@@ -185,7 +189,6 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
         let metadata = std::fs::metadata("/proc/self").expect("process metadata");
         KWinEnv {
-            pid: 0,
             uid: metadata.uid(),
             gid: metadata.gid(),
             wayland_display: "wayland-1".into(),
@@ -255,5 +258,15 @@ mod tests {
     fn parse_outputs_empty_input() {
         let outputs = parse_outputs("");
         assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn parse_outputs_discards_unsafe_connector_names() {
+        let text = "Output: 1 DP-1.disable uuid1\n    enabled\n    Geometry: 0,0 1920x1080\nOutput: 2 HDMI-A-1 uuid2\n    enabled\n    Geometry: 1920,0 1920x1080\n";
+
+        let outputs = parse_outputs(text);
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].name, "HDMI-A-1");
     }
 }

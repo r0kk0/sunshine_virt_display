@@ -14,27 +14,44 @@ use crate::strategy::{
 };
 use svd_proto::{CardId, ConnectorId, LifecyclePhase, Mode};
 
-// ---------------------------------------------------------------------------
-// Local helper: read the real uid of a process from /proc/$pid/status
-// ---------------------------------------------------------------------------
+fn resolve_candidates<F>(
+    candidates: Vec<env::KWinEnv>,
+    mut probe: F,
+) -> Result<env::KWinEnv, StrategyError>
+where
+    F: FnMut(&env::KWinEnv) -> Result<String, StrategyError>,
+{
+    if candidates.is_empty() {
+        return Err(StrategyError::CompositorNotFound);
+    }
 
-fn read_uid(pid: u32) -> Result<u32, StrategyError> {
-    let status_path = format!("/proc/{}/status", pid);
-    let contents = std::fs::read_to_string(&status_path).map_err(StrategyError::Io)?;
-
-    for line in contents.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:") {
-            // Format: "Uid:\tREAL EFFECTIVE SAVED FILESYSTEM"
-            let first = rest
-                .split_whitespace()
-                .next()
-                .ok_or(StrategyError::CompositorNotFound)?;
-            return first
-                .parse::<u32>()
-                .map_err(|_| StrategyError::CompositorNotFound);
+    let mut successes = Vec::new();
+    let mut last_error = None;
+    for candidate in candidates {
+        match probe(&candidate) {
+            Ok(_) => successes.push(candidate),
+            Err(error) => {
+                tracing::debug!(
+                    uid = candidate.uid,
+                    wayland_display = %candidate.wayland_display,
+                    %error,
+                    "discarding Wayland candidate after failed KScreen probe"
+                );
+                last_error = Some(error);
+            }
         }
     }
-    Err(StrategyError::CompositorNotFound)
+
+    match successes.len() {
+        0 => Err(last_error.unwrap_or(StrategyError::CompositorNotFound)),
+        1 => Ok(successes.remove(0)),
+        _ => Err(StrategyError::AmbiguousCompositor),
+    }
+}
+
+fn resolve_compositor(requester_uid: Option<u32>) -> Result<env::KWinEnv, StrategyError> {
+    let candidates = env::discover_for_uid(requester_uid)?;
+    resolve_candidates(candidates, kscreen::list_outputs)
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +181,7 @@ impl DisplayStrategy for KWinStrategy {
         }
 
         // Step 1: Detect KWin environment.
-        let kwin_env = env::KWinEnv::detect_for_uid(params.requester_uid)?;
+        let kwin_env = resolve_compositor(params.requester_uid)?;
 
         // Step 2: Select DRM card.
         let card = if let Some(dev) = params.device.as_ref().or(self.default_device.as_ref()) {
@@ -228,8 +245,7 @@ impl DisplayStrategy for KWinStrategy {
         }
 
         // Step 6: Clear stale KWin output config.
-        let uid = read_uid(kwin_env.pid)?;
-        if let Err(error) = sysfs::clear_kwin_output_config(&slot, uid) {
+        if let Err(error) = sysfs::clear_kwin_output_config(&slot, kwin_env.uid) {
             return Err(self.failed_connect(cs, &kwin_env, error));
         }
 
@@ -351,7 +367,7 @@ impl DisplayStrategy for KWinStrategy {
         state.save(&self.state_path)?;
         self.cache(Some(state.clone()));
 
-        let kwin_env = env::KWinEnv::detect_for_uid(Some(state.session_uid)).ok();
+        let kwin_env = resolve_compositor(Some(state.session_uid)).ok();
         if let Err(error) = self.cleanup_state(&state, kwin_env.as_ref()) {
             state.phase = LifecyclePhase::RecoveryRequired;
             state.save(&self.state_path)?;
@@ -373,7 +389,7 @@ impl DisplayStrategy for KWinStrategy {
             Some(state) => state,
             None => return Ok(()),
         };
-        let kwin_env = env::KWinEnv::detect_for_uid(Some(state.session_uid)).ok();
+        let kwin_env = resolve_compositor(Some(state.session_uid)).ok();
         let active = kwin_env
             .as_ref()
             .and_then(|environment| kscreen::list_outputs(environment).ok())
@@ -444,7 +460,86 @@ impl DisplayStrategy for KWinStrategy {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    use crate::strategy::kwin::env::KWinEnv;
     use crate::strategy::kwin::kscreen::OutputInfo;
+
+    fn candidate(display: &str) -> KWinEnv {
+        KWinEnv {
+            uid: 1000,
+            gid: 1000,
+            wayland_display: display.into(),
+            xdg_runtime_dir: "/run/user/1000".into(),
+        }
+    }
+
+    #[test]
+    fn resolver_returns_compositor_not_found_without_candidates() {
+        let result = resolve_candidates(Vec::new(), |_| Ok(String::new()));
+        assert!(matches!(result, Err(StrategyError::CompositorNotFound)));
+    }
+
+    #[test]
+    fn resolver_selects_single_success() {
+        let result = resolve_candidates(vec![candidate("wayland-2")], |_| Ok("outputs".into()))
+            .expect("resolve candidate");
+        assert_eq!(result.wayland_display, "wayland-2");
+    }
+
+    #[test]
+    fn resolver_skips_stale_candidate_and_selects_valid_one() {
+        let result = resolve_candidates(
+            vec![candidate("wayland-0"), candidate("wayland-1")],
+            |environment| {
+                if environment.wayland_display == "wayland-1" {
+                    Ok("outputs".into())
+                } else {
+                    Err(StrategyError::KscreenDoctor("stale socket".into()))
+                }
+            },
+        )
+        .expect("resolve valid candidate");
+        assert_eq!(result.wayland_display, "wayland-1");
+    }
+
+    #[test]
+    fn resolver_preserves_kscreen_error_when_all_probes_fail() {
+        let result = resolve_candidates(
+            vec![candidate("wayland-0"), candidate("wayland-1")],
+            |environment| {
+                Err(StrategyError::KscreenDoctor(format!(
+                    "{} failed",
+                    environment.wayland_display
+                )))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(StrategyError::KscreenDoctor(message)) if message == "wayland-1 failed"
+        ));
+    }
+
+    #[test]
+    fn resolver_rejects_multiple_successful_compositors() {
+        let result =
+            resolve_candidates(vec![candidate("wayland-0"), candidate("wayland-1")], |_| {
+                Ok("outputs".into())
+            });
+        assert!(matches!(result, Err(StrategyError::AmbiguousCompositor)));
+    }
+
+    #[test]
+    fn resolver_preserves_missing_binary_error() {
+        let result = resolve_candidates(vec![candidate("wayland-0")], |_| {
+            Err(StrategyError::KscreenDoctor(
+                "kscreen-doctor not found in PATH".into(),
+            ))
+        });
+        assert!(matches!(
+            result,
+            Err(StrategyError::KscreenDoctor(message))
+                if message == "kscreen-doctor not found in PATH"
+        ));
+    }
 
     #[test]
     fn restore_arguments_enable_physical_outputs_before_disabling_virtual() {

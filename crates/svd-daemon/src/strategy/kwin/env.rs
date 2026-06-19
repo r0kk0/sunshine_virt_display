@@ -1,270 +1,260 @@
-use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::path::{Path, PathBuf};
 
 use crate::strategy::StrategyError;
 
-/// Extract the Wayland socket name from a process's `/proc/$pid/cmdline`.
-///
-/// KWin receives the socket name via `--socket <name>` rather than setting
-/// `WAYLAND_DISPLAY` in its own environment, so we fall back to this when
-/// the variable is absent.  Returns `None` if the arg is not present.
-fn read_socket_from_cmdline(pid: u32) -> Option<String> {
-    let raw = fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
-    // cmdline is a NUL-separated list of arguments.
-    let args: Vec<&str> = raw
-        .split(|&b| b == 0)
-        .filter_map(|s| std::str::from_utf8(s).ok())
-        .filter(|s| !s.is_empty())
-        .collect();
-    for (i, arg) in args.iter().enumerate() {
-        if *arg == "--socket" {
-            return args.get(i + 1).map(|s| s.to_string());
-        }
-        if let Some(val) = arg.strip_prefix("--socket=") {
-            return Some(val.to_string());
-        }
-    }
-    None
-}
-
-fn select_wayland_socket<I, S>(names: I) -> Option<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut sockets: Vec<String> = names
-        .into_iter()
-        .filter_map(|name| {
-            let name = name.as_ref();
-            let suffix = name.strip_prefix("wayland-")?;
-            (!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
-                .then(|| name.to_owned())
-        })
-        .collect();
-    sockets.sort();
-    sockets.into_iter().next()
-}
-
-fn scan_wayland_socket(runtime_dir: &str) -> Option<String> {
-    let names = fs::read_dir(runtime_dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned());
-    select_wayland_socket(names)
-}
-
-/// Wayland session environment extracted from a running `kwin_wayland` process.
-#[derive(Debug, Clone)]
+/// Candidate Wayland session derived from a trusted runtime directory and socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KWinEnv {
-    pub pid: u32,
     pub uid: u32,
     pub gid: u32,
     pub wayland_display: String,
     pub xdg_runtime_dir: String,
 }
 
-impl KWinEnv {
-    /// Scan `/proc` for a verified `kwin_wayland` process owned by the requested
-    /// UID, then locate its Wayland socket without requiring ptrace capability.
-    ///
-    /// Returns [`StrategyError::CompositorNotFound`] if no `kwin_wayland`
-    /// process or usable runtime socket can be identified. Returns
-    /// [`StrategyError::Io`] when top-level `/proc` enumeration fails.
-    pub fn detect() -> Result<Self, StrategyError> {
-        Self::detect_for_uid(None)
-    }
+pub fn discover_for_uid(requester_uid: Option<u32>) -> Result<Vec<KWinEnv>, StrategyError> {
+    discover_in(Path::new("/run/user"), requester_uid)
+}
 
-    pub fn detect_for_uid(requester_uid: Option<u32>) -> Result<Self, StrategyError> {
-        // A top-level failure to enumerate /proc is a real I/O error.
-        let entries = fs::read_dir("/proc").map_err(StrategyError::Io)?;
+fn discover_in(
+    runtime_root: &Path,
+    requester_uid: Option<u32>,
+) -> Result<Vec<KWinEnv>, StrategyError> {
+    let effective_uid = unsafe { libc::geteuid() };
+    let scope_uid = requester_uid.unwrap_or(effective_uid);
+    let runtime_dirs: Vec<PathBuf> = if scope_uid == 0 {
+        fs::read_dir(runtime_root)
+            .map_err(StrategyError::Io)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u32>().ok())
+                    .map(|_| entry.path())
+            })
+            .collect()
+    } else {
+        vec![runtime_root.join(scope_uid.to_string())]
+    };
 
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            // Only consider numeric directory names (PIDs).
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-            let pid: u32 = match name.parse() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-
-            // Read /proc/$pid/comm to get the process name.
-            // A read failure here means the process may have vanished — skip it.
-            let comm_path = format!("/proc/{}/comm", pid);
-            let comm = match fs::read_to_string(&comm_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            // Match "kwin_wayland" and "kwin_wayland_wrapper" (the latter is
-            // truncated to "kwin_wayland_wr" in comm by the 15-char kernel limit).
-            // On some distros the wrapper process owns the session environment
-            // while the inner kwin_wayland receives the socket via fd, so we
-            // try ALL matching processes and pick the first with both vars set.
-            if !comm.trim().starts_with("kwin_wayland") {
+    let mut candidates = Vec::new();
+    for runtime_dir in runtime_dirs {
+        let Some(uid) = runtime_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let metadata = match fs::symlink_metadata(&runtime_dir) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::debug!(path = %runtime_dir.display(), %error, "discarding runtime directory");
                 continue;
             }
+        };
+        if !metadata.file_type().is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != uid
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            tracing::debug!(
+                path = %runtime_dir.display(),
+                expected_uid = uid,
+                actual_uid = metadata.uid(),
+                mode = format_args!("{:04o}", metadata.mode() & 0o7777),
+                "discarding untrusted runtime directory"
+            );
+            continue;
+        }
 
-            let executable = match fs::canonicalize(format!("/proc/{pid}/exe")) {
-                Ok(path) => path,
-                Err(_) => continue,
+        let entries = match fs::read_dir(&runtime_dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::debug!(path = %runtime_dir.display(), %error, "discarding unreadable runtime directory");
+                continue;
+            }
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
             };
-            let executable_metadata = match fs::metadata(&executable) {
+            let Some(suffix) = name.strip_prefix("wayland-") else {
+                continue;
+            };
+            if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            let socket_metadata = match fs::symlink_metadata(entry.path()) {
                 Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            if !executable_metadata.is_file()
-                || executable_metadata.uid() != 0
-                || executable_metadata.permissions().mode() & 0o111 == 0
-            {
-                continue;
-            }
-
-            let status = match fs::read_to_string(format!("/proc/{pid}/status")) {
-                Ok(status) => status,
-                Err(_) => continue,
-            };
-            let Some((uid, gid)) = parse_process_ids(&status) else {
-                continue;
-            };
-            if requester_uid.is_some_and(|requester| requester != 0 && requester != uid) {
-                continue;
-            }
-
-            // Reading another user's environ/cmdline can require CAP_SYS_PTRACE.
-            // Treat both as optional hints and fall back to the owned runtime dir.
-            let raw = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
-            let vars = parse_environ(&raw);
-            let xdg_runtime_dir = format!("/run/user/{uid}");
-
-            // KWin often does not set WAYLAND_DISPLAY in its own environment —
-            // the socket name is passed via --socket <name> on the command line.
-            // Fall back to reading cmdline, then to the conventional default.
-            let wayland_display = {
-                let from_env = vars.get("WAYLAND_DISPLAY").cloned().unwrap_or_default();
-                if !from_env.is_empty() {
-                    from_env
-                } else {
-                    read_socket_from_cmdline(pid)
-                        .or_else(|| scan_wayland_socket(&xdg_runtime_dir))
-                        .unwrap_or_else(|| "wayland-0".into())
+                Err(error) => {
+                    tracing::debug!(path = %entry.path().display(), %error, "discarding Wayland candidate");
+                    continue;
                 }
             };
-            if wayland_display.is_empty()
-                || wayland_display.len() > 108
-                || wayland_display.contains('/')
-                || wayland_display.chars().any(char::is_control)
-            {
+            if !socket_metadata.file_type().is_socket() || socket_metadata.uid() != uid {
+                tracing::debug!(
+                    path = %entry.path().display(),
+                    owner = socket_metadata.uid(),
+                    "discarding untrusted Wayland candidate"
+                );
                 continue;
             }
-
-            return Ok(KWinEnv {
-                pid,
+            let candidate = KWinEnv {
                 uid,
-                gid,
-                wayland_display,
-                xdg_runtime_dir,
-            });
-        }
-
-        Err(StrategyError::CompositorNotFound)
-    }
-}
-
-pub(crate) fn parse_process_ids(status: &str) -> Option<(u32, u32)> {
-    let mut uid = None;
-    let mut gid = None;
-    for line in status.lines() {
-        if let Some(value) = line.strip_prefix("Uid:") {
-            uid = value.split_whitespace().next()?.parse().ok();
-        } else if let Some(value) = line.strip_prefix("Gid:") {
-            gid = value.split_whitespace().next()?.parse().ok();
+                gid: metadata.gid(),
+                wayland_display: name.to_owned(),
+                xdg_runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+            };
+            tracing::debug!(
+                uid,
+                gid = candidate.gid,
+                wayland_display = %candidate.wayland_display,
+                "discovered Wayland candidate"
+            );
+            candidates.push(candidate);
         }
     }
-    Some((uid?, gid?))
-}
-
-/// Parse a NUL-separated `KEY=VALUE` byte blob (as found in `/proc/$pid/environ`)
-/// into a `HashMap`.
-///
-/// - Splits on the **first** `=` so values containing `=` are preserved.
-/// - Skips empty segments (the trailing NUL produces one).
-/// - Silently skips entries that are not valid UTF-8.
-pub(crate) fn parse_environ(bytes: &[u8]) -> HashMap<String, String> {
-    bytes
-        .split(|&b| b == 0)
-        .filter(|seg| !seg.is_empty())
-        .filter_map(|seg| {
-            let s = std::str::from_utf8(seg).ok()?;
-            let eq = s.find('=')?;
-            let key = s[..eq].to_owned();
-            let value = s[eq + 1..].to_owned();
-            Some((key, value))
-        })
-        .collect()
+    candidates.sort_by(|left, right| {
+        (left.uid, &left.wayland_display).cmp(&(right.uid, &right.wayland_display))
+    });
+    Ok(candidates)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn parse_environ_bytes_extracts_vars() {
-        let raw = b"HOME=/root\0WAYLAND_DISPLAY=wayland-1\0XDG_RUNTIME_DIR=/run/user/1000\0";
-        let vars = parse_environ(raw);
-        assert_eq!(
-            vars.get("WAYLAND_DISPLAY").map(String::as_str),
-            Some("wayland-1")
-        );
-        assert_eq!(
-            vars.get("XDG_RUNTIME_DIR").map(String::as_str),
-            Some("/run/user/1000")
-        );
-        assert_eq!(vars.get("HOME").map(String::as_str), Some("/root"));
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let sequence = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("svd-env-test-{}-{sequence}", std::process::id()));
+            fs::create_dir(&path).expect("create temporary root");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn current_ids() -> (u32, u32) {
+        let metadata = fs::metadata("/proc/self").expect("process metadata");
+        (metadata.uid(), metadata.gid())
+    }
+
+    fn runtime_dir(root: &Path, uid: u32) -> PathBuf {
+        let path = root.join(uid.to_string());
+        fs::create_dir(&path).expect("create runtime directory");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .expect("set runtime permissions");
+        path
     }
 
     #[test]
-    fn parse_environ_value_with_equals() {
-        // Values that themselves contain '=' must be preserved in full.
-        let raw = b"FOO=bar=baz\0";
-        let vars = parse_environ(raw);
-        assert_eq!(vars.get("FOO").map(String::as_str), Some("bar=baz"));
+    fn discovery_accepts_owned_wayland_socket() {
+        let root = TempDir::new();
+        let (uid, gid) = current_ids();
+        let runtime = runtime_dir(root.path(), uid);
+        let _socket = UnixListener::bind(runtime.join("wayland-7")).expect("bind socket");
+
+        let candidates = discover_in(root.path(), Some(uid)).expect("discover candidates");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].uid, uid);
+        assert_eq!(candidates[0].gid, gid);
+        assert_eq!(candidates[0].wayland_display, "wayland-7");
+        assert_eq!(candidates[0].xdg_runtime_dir, runtime.to_string_lossy());
     }
 
     #[test]
-    fn parse_environ_trailing_nul_skipped() {
-        // A trailing NUL must not produce a spurious empty entry.
-        let raw = b"A=1\0";
-        let vars = parse_environ(raw);
-        assert_eq!(vars.len(), 1);
+    fn discovery_ignores_regular_files_and_lock_files() {
+        let root = TempDir::new();
+        let (uid, _) = current_ids();
+        let runtime = runtime_dir(root.path(), uid);
+        fs::write(runtime.join("wayland-0"), b"not a socket").expect("write regular file");
+        fs::write(runtime.join("wayland-1.lock"), b"").expect("write lock file");
+
+        assert!(discover_in(root.path(), Some(uid))
+            .expect("discover candidates")
+            .is_empty());
     }
 
     #[test]
-    fn parse_environ_empty_input() {
-        let vars = parse_environ(b"");
-        assert!(vars.is_empty());
+    fn discovery_rejects_symlink_socket() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new();
+        let (uid, _) = current_ids();
+        let runtime = runtime_dir(root.path(), uid);
+        let _socket = UnixListener::bind(runtime.join("real-socket")).expect("bind socket");
+        symlink("real-socket", runtime.join("wayland-0")).expect("create socket symlink");
+
+        assert!(discover_in(root.path(), Some(uid))
+            .expect("discover candidates")
+            .is_empty());
     }
 
     #[test]
-    fn parse_process_ids_reads_real_uid_and_gid() {
-        let status =
-            "Name:\tkwin_wayland\nUid:\t1000\t1000\t1000\t1000\nGid:\t1001\t1001\t1001\t1001\n";
-        assert_eq!(parse_process_ids(status), Some((1000, 1001)));
+    fn discovery_rejects_symlink_runtime_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new();
+        let (uid, _) = current_ids();
+        let target = root.path().join("runtime-target");
+        fs::create_dir(&target).expect("create runtime target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700))
+            .expect("set runtime permissions");
+        let _socket = UnixListener::bind(target.join("wayland-0")).expect("bind socket");
+        symlink(&target, root.path().join(uid.to_string())).expect("create runtime symlink");
+
+        assert!(discover_in(root.path(), Some(uid))
+            .expect("discover candidates")
+            .is_empty());
     }
 
     #[test]
-    fn parse_process_ids_rejects_missing_fields() {
-        assert_eq!(parse_process_ids("Uid:\t1000\t1000\n"), None);
+    fn discovery_rejects_insecure_runtime_directory_mode() {
+        let root = TempDir::new();
+        let (uid, _) = current_ids();
+        let runtime = runtime_dir(root.path(), uid);
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o750))
+            .expect("set insecure permissions");
+        let _socket = UnixListener::bind(runtime.join("wayland-0")).expect("bind socket");
+
+        assert!(discover_in(root.path(), Some(uid))
+            .expect("discover candidates")
+            .is_empty());
     }
 
     #[test]
-    fn wayland_socket_selector_ignores_locks_and_unrelated_names() {
-        let names = ["pipewire-0", "wayland-1.lock", "wayland-2", "wayland-0"];
-        assert_eq!(select_wayland_socket(names), Some("wayland-0".into()));
+    fn discovery_rejects_runtime_directory_owned_by_another_uid() {
+        let root = TempDir::new();
+        let (uid, _) = current_ids();
+        let claimed_uid = uid.checked_add(1).expect("test uid increment");
+        let runtime = runtime_dir(root.path(), claimed_uid);
+        let _socket = UnixListener::bind(runtime.join("wayland-0")).expect("bind socket");
+
+        assert!(discover_in(root.path(), Some(0))
+            .expect("discover candidates")
+            .is_empty());
     }
 }

@@ -45,6 +45,8 @@ pub enum StrategyError {
     KscreenDoctor(String),
     #[error("compositor (KWin) not found")]
     CompositorNotFound,
+    #[error("multiple usable KWin compositors found")]
+    AmbiguousCompositor,
     #[error("connect timeout waiting for CRTC assignment")]
     Timeout,
     #[error("not connected (no state file)")]
