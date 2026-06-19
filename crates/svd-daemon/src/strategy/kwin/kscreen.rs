@@ -170,6 +170,35 @@ fn parse_geometry(s: &str) -> Option<(i32, i32, u32, u32)> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// ANSI sanitizer
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn strip_ansi_csi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for inner in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&inner) {
+                        break;
+                    }
+                }
+            }
+            Some(other) => {
+                out.push(other);
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // kscreen-doctor subprocess
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -212,7 +241,7 @@ fn run_with_binary(binary: &str, env: &KWinEnv, args: &[&str]) -> Result<String,
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.trim().to_owned())
+    Ok(strip_ansi_csi(stdout.as_ref()).trim().to_owned())
 }
 
 /// Run kscreen-doctor with the given arguments, using the KWin session environment.
@@ -379,5 +408,56 @@ mod tests {
         let text = "Output: 1 DP-1 uuid\n    enabled\n    Modes:  malformed*\n";
 
         assert!(!active_mode_matches(text, "DP-1", 1920, 1080, 60));
+    }
+
+    // ── ANSI sanitizer tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn strip_ansi_removes_sgr_sequences() {
+        let input = "\x1b[01;32mOutput: \x1b[0;0m1 DP-1 uuid";
+        assert_eq!(strip_ansi_csi(input), "Output: 1 DP-1 uuid");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_plain_text() {
+        let input = "Output: 1 DP-1 uuid\n    enabled\n    Geometry: 0,0 1920x1080";
+        assert_eq!(strip_ansi_csi(input), input);
+    }
+
+    #[test]
+    fn strip_ansi_no_panic_on_truncated_escape() {
+        let _ = strip_ansi_csi("\x1b");
+        let _ = strip_ansi_csi("\x1b[01;32");
+    }
+
+    #[test]
+    fn parse_outputs_colored_output_block() {
+        let colored = "\x1b[01;32mOutput: \x1b[0;0m1 DP-1 233cb8ab-5f87-40fc-9c7f-a17389b58f68\n\
+                       \x1b[01;34m    enabled\x1b[0;0m\n\
+                           connected\n\
+                       \x1b[01;34m    Geometry: \x1b[0;0m0,0 1920x1080\n\
+                       \x1b[01;34m    Scale: \x1b[0;0m1\n";
+        let clean = strip_ansi_csi(colored);
+        let outputs = parse_outputs(&clean);
+        assert_eq!(outputs.len(), 1, "expected 1 output, got: {:?}", outputs);
+        assert_eq!(outputs[0].name, "DP-1");
+        assert!(outputs[0].enabled);
+        assert_eq!(outputs[0].width, 1920);
+        assert_eq!(outputs[0].height, 1080);
+    }
+
+    #[test]
+    fn active_mode_matches_colored_fixture() {
+        let colored = "\x1b[01;32mOutput: \x1b[0;0m1 DP-1 233cb8ab-5f87-40fc-9c7f-a17389b58f68\n\
+                       \x1b[01;34m    enabled\x1b[0;0m\n\
+                           connected\n\
+                       \x1b[01;34m    Modes: \x1b[0;0m 1:\x1b[01;32m1920x1080@60.00*!\x1b[0;0m\n\
+                       \x1b[01;34m    Geometry: \x1b[0;0m0,0 1920x1080\n\
+                       \x1b[01;34m    Scale: \x1b[0;0m1\n";
+        let clean = strip_ansi_csi(colored);
+        assert!(
+            active_mode_matches(&clean, "DP-1", 1920, 1080, 60),
+            "active_mode_matches should return true for colored DP-1 fixture"
+        );
     }
 }
