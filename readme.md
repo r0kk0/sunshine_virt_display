@@ -121,7 +121,6 @@ Rust workspace layout:
 - `crates/svd-daemon`: privileged IPC, lifecycle, KWin, DRM, sleep, and watcher logic
 - `deploy`: service and configuration examples
 
-See `AGENTS.md` for contribution rules and `docs/superpowers/plans/2026-06-18-rust-hardening.md` for the v0.2 hardening plan.
 
 ## Migrating from 0.1
 
