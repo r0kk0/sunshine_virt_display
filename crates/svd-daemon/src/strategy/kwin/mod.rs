@@ -287,7 +287,7 @@ impl DisplayStrategy for KWinStrategy {
             }
         }
         if !appeared {
-            return Err(self.failed_connect(cs, &kwin_env, StrategyError::Timeout));
+            return Err(self.failed_connect(cs, &kwin_env, StrategyError::OutputDetectionTimeout));
         }
 
         // Step 12: Compute where to place the virtual display.
@@ -323,16 +323,17 @@ impl DisplayStrategy for KWinStrategy {
 
         let verified = kscreen::list_outputs(&kwin_env)
             .map(|raw| {
-                kscreen::parse_outputs(&raw).into_iter().any(|output| {
-                    output.name == slot
-                        && output.enabled
-                        && output.width == params.width
-                        && output.height == params.height
-                })
+                kscreen::active_mode_matches(
+                    &raw,
+                    &slot,
+                    params.width,
+                    params.height,
+                    params.refresh,
+                )
             })
             .unwrap_or(false);
         if !verified {
-            return Err(self.failed_connect(cs, &kwin_env, StrategyError::Timeout));
+            return Err(self.failed_connect(cs, &kwin_env, StrategyError::ModeVerificationFailed));
         }
 
         // Step 15: Save state.

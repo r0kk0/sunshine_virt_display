@@ -91,6 +91,71 @@ pub fn parse_outputs(text: &str) -> Vec<OutputInfo> {
     result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ActiveMode {
+    width: u32,
+    height: u32,
+    refresh: f64,
+}
+
+fn parse_active_mode_token(token: &str) -> Option<ActiveMode> {
+    let marker_index = token.find(['*', '!'])?;
+    if !token[marker_index..].contains('*') {
+        return None;
+    }
+    let (_, mode) = token[..marker_index].split_once(':')?;
+    let (size, refresh) = mode.split_once('@')?;
+    let (width, height) = size.split_once('x')?;
+    Some(ActiveMode {
+        width: width.parse().ok()?,
+        height: height.parse().ok()?,
+        refresh: refresh.parse().ok()?,
+    })
+}
+
+pub(crate) fn active_mode_matches(
+    text: &str,
+    connector: &str,
+    width: u32,
+    height: u32,
+    refresh: u32,
+) -> bool {
+    if ConnectorId::try_from(connector).is_err() {
+        return false;
+    }
+
+    let mut current_is_target = false;
+    let mut enabled = false;
+    let mut active_mode = None;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Output:") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            current_is_target = parts.get(1).is_some_and(|name| *name == connector);
+            if current_is_target {
+                enabled = false;
+                active_mode = None;
+            }
+        } else if current_is_target && trimmed == "enabled" {
+            enabled = true;
+        } else if current_is_target && trimmed == "disabled" {
+            enabled = false;
+        } else if current_is_target {
+            if let Some(modes) = trimmed.strip_prefix("Modes:") {
+                active_mode = modes.split_whitespace().find_map(parse_active_mode_token);
+            }
+        }
+    }
+
+    enabled
+        && active_mode.is_some_and(|mode| {
+            mode.width == width
+                && mode.height == height
+                && (mode.refresh - f64::from(refresh)).abs() <= 0.5
+        })
+}
+
 fn parse_geometry(s: &str) -> Option<(i32, i32, u32, u32)> {
     // Format: "x,y WxH"  e.g. "-2560,0 2560x1440" or "0,0 1920x1080"
     let (pos, size) = s.split_once(' ')?;
@@ -268,5 +333,51 @@ mod tests {
 
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].name, "HDMI-A-1");
+    }
+
+    #[test]
+    fn active_mode_matches_physical_pixels_instead_of_scaled_geometry() {
+        let text = "Output: 1 DP-3 uuid\n    enabled\n    Modes:  1:3840x2160@60.00!  2:3840x2160@144.00*\n    Geometry: 2560,0 2560x1440\n    Scale: 1.5\n";
+
+        assert!(active_mode_matches(text, "DP-3", 3840, 2160, 144));
+        assert!(!active_mode_matches(text, "DP-3", 2560, 1440, 144));
+    }
+
+    #[test]
+    fn active_mode_accepts_fractional_refresh_close_to_requested_integer() {
+        let text = "Output: 1 DP-1 uuid\n    enabled\n    Modes:  1:1920x1080@59.94*\n    Geometry: 0,0 1920x1080\n";
+
+        assert!(active_mode_matches(text, "DP-1", 1920, 1080, 60));
+    }
+
+    #[test]
+    fn active_mode_rejects_wrong_refresh() {
+        let text = "Output: 1 DP-1 uuid\n    enabled\n    Modes:  1:1920x1080@120.00*\n";
+
+        assert!(!active_mode_matches(text, "DP-1", 1920, 1080, 60));
+    }
+
+    #[test]
+    fn active_mode_does_not_treat_preferred_mode_as_current() {
+        let text =
+            "Output: 1 DP-1 uuid\n    enabled\n    Modes:  1:1920x1080@60.00!  2:1280x720@60.00*\n";
+
+        assert!(!active_mode_matches(text, "DP-1", 1920, 1080, 60));
+        assert!(active_mode_matches(text, "DP-1", 1280, 720, 60));
+    }
+
+    #[test]
+    fn active_mode_rejects_disabled_or_different_connector() {
+        let text = "Output: 1 DP-1 uuid\n    disabled\n    Modes:  1:1920x1080@60.00*\nOutput: 2 DP-2 uuid\n    enabled\n    Modes:  2:1920x1080@60.00*\n";
+
+        assert!(!active_mode_matches(text, "DP-1", 1920, 1080, 60));
+        assert!(!active_mode_matches(text, "DP-3", 1920, 1080, 60));
+    }
+
+    #[test]
+    fn active_mode_rejects_malformed_mode_token() {
+        let text = "Output: 1 DP-1 uuid\n    enabled\n    Modes:  malformed*\n";
+
+        assert!(!active_mode_matches(text, "DP-1", 1920, 1080, 60));
     }
 }

@@ -47,8 +47,10 @@ pub enum StrategyError {
     CompositorNotFound,
     #[error("multiple usable KWin compositors found")]
     AmbiguousCompositor,
-    #[error("connect timeout waiting for CRTC assignment")]
-    Timeout,
+    #[error("connect timeout waiting for KWin to detect the virtual output")]
+    OutputDetectionTimeout,
+    #[error("KWin did not apply the requested virtual display mode")]
+    ModeVerificationFailed,
     #[error("not connected (no state file)")]
     NotConnected,
     #[error("already connected — disconnect first")]
